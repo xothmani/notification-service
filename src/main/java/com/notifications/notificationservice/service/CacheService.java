@@ -5,11 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.notifications.notificationservice.dto.NotificationResponse;
 import com.notifications.notificationservice.dto.PageResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
-import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -48,9 +51,9 @@ public class CacheService {
                 NOTIFICATIONS_KEY,
                 userId,
                 organizationId != null ? organizationId : "",
-                state       != null ? state       : "",
-                tier        != null ? tier        : "",
-                type        != null ? type        : "",
+                state          != null ? state          : "",
+                tier           != null ? tier           : "",
+                type           != null ? type           : "",
                 page, limit);
     }
 
@@ -70,15 +73,21 @@ public class CacheService {
 
     /**
      * Delete the unread count and ALL notification page caches for a user.
-     * Uses Redis KEYS — acceptable for this service; replace with SCAN in high-scale prod.
+     * Uses Redis SCAN (non-blocking, cursor-based) — safe for production.
      */
     public void invalidateUserCache(String userId) {
         redisTemplate.delete(UNREAD_COUNT_KEY + userId);
 
-        Set<String> notificationKeys =
-                redisTemplate.keys(NOTIFICATIONS_KEY + userId + ":*");
-        if (notificationKeys != null && !notificationKeys.isEmpty()) {
-            redisTemplate.delete(notificationKeys);
+        String pattern = NOTIFICATIONS_KEY + userId + ":*";
+        ScanOptions options = ScanOptions.scanOptions().match(pattern).count(100).build();
+
+        List<String> keysToDelete = new ArrayList<>();
+        try (Cursor<String> cursor = redisTemplate.scan(options)) {
+            cursor.forEachRemaining(keysToDelete::add);
+        }
+
+        if (!keysToDelete.isEmpty()) {
+            redisTemplate.delete(keysToDelete);
         }
     }
 }

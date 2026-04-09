@@ -24,8 +24,8 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class NotificationWorker {
 
-    private static final String QUEUE_KEY  = "notifications_queue";
-    private static final String DLQ_KEY    = "notifications_dlq";
+    private static final String QUEUE_KEY   = "notifications_queue";
+    private static final String DLQ_KEY     = "notifications_dlq";
     private static final int    MAX_RETRIES = 3;
 
     private final RedisTemplate<String, Object>  redisTemplate;
@@ -43,42 +43,57 @@ public class NotificationWorker {
         if (job == null) return;
 
         log.info("Processing notification job from queue");
-        processWithRetry(job);
+
+        // Deserialize once before entering the retry loop.
+        // A malformed payload cannot be fixed by retrying — send straight to DLQ.
+        NotificationPayload payload;
+        try {
+            payload = objectMapper.convertValue(job, NotificationPayload.class);
+        } catch (Exception e) {
+            log.error("Malformed queue job — cannot deserialize payload. Sending to DLQ.", e);
+            redisTemplate.opsForList().rightPush(DLQ_KEY, job);
+            return;
+        }
+
+        // broadcastId is fixed for this job. Generating it inside the retry loop
+        // would assign different IDs to duplicated notifications on each retry attempt.
+        String broadcastId = UUID.randomUUID().toString();
+
+        processWithRetry(job, payload, broadcastId);
     }
 
-    private void processWithRetry(Object job) {
+    private void processWithRetry(Object rawJob,
+                                  NotificationPayload payload,
+                                  String broadcastId) {
         int attempt = 0;
 
         while (attempt <= MAX_RETRIES) {
             try {
-                NotificationPayload payload =
-                        objectMapper.convertValue(job, NotificationPayload.class);
-
-                String broadcastId = UUID.randomUUID().toString();
-
                 for (String recipientId : payload.getRecipientIds()) {
                     processForRecipient(payload, recipientId, broadcastId);
                 }
-
-                return; // success — exit retry loop
+                log.info("Successfully processed broadcastId {} for {} recipient(s)",
+                        broadcastId, payload.getRecipientIds().size());
+                return;
 
             } catch (Exception e) {
-                log.error("Failed to process job. Attempt {}/{}", attempt, MAX_RETRIES, e);
+                log.error("Failed to process broadcastId {}. Attempt {}/{}",
+                        broadcastId, attempt, MAX_RETRIES, e);
 
                 if (attempt < MAX_RETRIES) {
-                    // Exponential back-off: 1s → 2s → 4s
-                    // Virtual threads make sleeping here cheap
+                    // Exponential back-off: 1 s → 2 s → 4 s
+                    // Virtual threads make blocking here cheap
                     long delayMs = (long) Math.pow(2, attempt) * 1000;
                     try {
                         Thread.sleep(delayMs);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        break;
+                        return;
                     }
                     attempt++;
                 } else {
-                    log.error("Max retries reached. Moving job to DLQ");
-                    redisTemplate.opsForList().rightPush(DLQ_KEY, job);
+                    log.error("Max retries reached for broadcastId {}. Moving to DLQ", broadcastId);
+                    redisTemplate.opsForList().rightPush(DLQ_KEY, rawJob);
                     return;
                 }
             }
@@ -105,13 +120,13 @@ public class NotificationWorker {
 
         notification = notificationRepository.save(notification);
 
-        // Invalidate user cache and refresh unread count
+        // Refresh cache after adding a new notification
         cacheService.invalidateUserCache(recipientId);
         long unreadCount = notificationRepository
                 .countByRecipientIdAndState(recipientId, "UNSEEN");
         cacheService.saveUnreadCount(recipientId, unreadCount);
 
-        // IN_APP — push via SSE
+        // IN_APP — push via SSE if user is connected
         if (payload.getChannels().contains("IN_APP")) {
             sseService.pushNotification(
                     recipientId, notificationService.mapToResponse(notification));
@@ -120,38 +135,25 @@ public class NotificationWorker {
 
         // EMAIL — placeholder (implement with SendGrid)
         if (payload.getChannels().contains("EMAIL")) {
-            try {
-                log.info("EMAIL channel — to be implemented with SendGrid");
-                // TODO: implement SendGrid
-            } catch (Exception e) {
-                saveFailedChannel(payload, "EMAIL", e.getMessage());
-            }
+            log.info("EMAIL channel — to be implemented with SendGrid");
+            // TODO: implement SendGrid; wrap in try-catch and call saveFailedChannel on error
         }
 
         // SMS — placeholder (implement with Twilio)
         if (payload.getChannels().contains("SMS")) {
-            try {
-                log.info("SMS channel — to be implemented with Twilio");
-                // TODO: implement Twilio
-            } catch (Exception e) {
-                saveFailedChannel(payload, "SMS", e.getMessage());
-            }
+            log.info("SMS channel — to be implemented with Twilio");
+            // TODO: implement Twilio; wrap in try-catch and call saveFailedChannel on error
         }
 
         // PUSH — placeholder (implement with FCM)
         if (payload.getChannels().contains("PUSH")) {
-            try {
-                log.info("PUSH channel — to be implemented with FCM");
-                // TODO: implement FCM
-            } catch (Exception e) {
-                saveFailedChannel(payload, "PUSH", e.getMessage());
-            }
+            log.info("PUSH channel — to be implemented with FCM");
+            // TODO: implement FCM; wrap in try-catch and call saveFailedChannel on error
         }
     }
 
-    private void saveFailedChannel(NotificationPayload payload,
-                                   String channel,
-                                   String reason) {
+    // Called by channel implementations when a specific delivery channel fails
+    void saveFailedChannel(NotificationPayload payload, String channel, String reason) {
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> originalPayload =
@@ -168,7 +170,7 @@ public class NotificationWorker {
             log.warn("Saved failed channel {} to failed_notifications. Reason: {}",
                     channel, reason);
         } catch (Exception e) {
-            log.error("Could not save failed notification to MongoDB", e);
+            log.error("Could not persist failed notification to MongoDB", e);
         }
     }
 }

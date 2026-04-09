@@ -5,6 +5,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.Index;
+import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
@@ -16,11 +19,13 @@ import java.util.Map;
 @AllArgsConstructor
 @NoArgsConstructor
 @Document(collection = "notifications")
+@CompoundIndex(name = "recipient_state_idx", def = "{'recipient_id': 1, 'state': 1}")
 public class Notification {
 
     @Id
     private String id;
 
+    @Indexed
     @Field("broadcast_id")
     private String broadcastId;
 
@@ -46,6 +51,7 @@ public class Notification {
     @Builder.Default
     private String state = "UNSEEN";
 
+    @Indexed
     @Field("created_at")
     private Instant createdAt;
 

@@ -22,7 +22,7 @@ public class InternalNotificationController {
     getBroadcastStats(
             @PathVariable String broadcastId) {
 
-        log.info("Getting broadcast stats for: {}", broadcastId);
+        log.debug("Getting broadcast stats for: {}", broadcastId);
 
         BroadcastStatsResponse stats =
                 notificationService.getBroadcastStats(broadcastId);

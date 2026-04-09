@@ -83,6 +83,11 @@ public class NotificationService {
                 .orElseThrow(() -> new NotFoundException(
                         "Notification not found: " + notificationId));
 
+        // Idempotent — skip DB write if already CLICKED
+        if ("CLICKED".equals(notification.getState())) {
+            return mapToResponse(notification);
+        }
+
         notification.setState("CLICKED");
         notification.setClickedAt(Instant.now());
         notification = notificationRepository.save(notification);
