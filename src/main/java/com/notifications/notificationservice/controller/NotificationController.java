@@ -5,8 +5,11 @@ import com.notifications.notificationservice.dto.NotificationResponse;
 import com.notifications.notificationservice.dto.PageResponse;
 import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,15 +24,23 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
+@Tag(name = "Notifications", description = "User notification management")
 public class NotificationController {
 
     private final NotificationService notificationService;
     private final SseService sseService;
 
     // GET /api/notifications
+    @Operation(summary = "Get paginated notifications for a user")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Success")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Bad Request — missing or invalid header/param")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "Service Unavailable — downstream store unreachable")
     @GetMapping("/notifications")
     public ResponseEntity<ApiResponse<PageResponse<NotificationResponse>>> getNotifications(
-            @RequestHeader("X-User-Id") String userId,
+            @RequestHeader("X-User-Id")
+            @NotBlank(message = "X-User-Id must not be blank")
+            @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
+            String userId,
             @RequestParam(required = false) String organizationId,
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "state must match ^[A-Z_]+$")
@@ -40,7 +51,7 @@ public class NotificationController {
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "type must match ^[A-Z_]+$")
             String type,
-            @RequestParam(defaultValue = "1")  @Min(1)          int page,
+            @RequestParam(defaultValue = "1")  @Min(1)           int page,
             @RequestParam(defaultValue = "10") @Min(1) @Max(100) int limit) {
 
         PageResponse<NotificationResponse> response =
@@ -51,26 +62,52 @@ public class NotificationController {
     }
 
     // PATCH /api/notifications/{id}/clicked
+    @Operation(summary = "Mark a notification as clicked")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Success")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Bad Request — missing or blank header/path")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404", description = "Not Found — notification does not exist or belongs to another user")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "Service Unavailable")
     @PatchMapping("/notifications/{notificationId}/clicked")
     public ResponseEntity<ApiResponse<NotificationResponse>> markAsClicked(
-            @PathVariable String notificationId) {
+            @RequestHeader("X-User-Id")
+            @NotBlank(message = "X-User-Id must not be blank")
+            @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
+            String userId,
+            @PathVariable
+            @NotBlank(message = "notificationId must not be blank")
+            String notificationId) {
 
         NotificationResponse response =
-                notificationService.markAsClicked(notificationId);
+                notificationService.markAsClicked(notificationId, userId);
 
         return ResponseEntity.ok(
                 ApiResponse.success(response, "Notification marked as clicked"));
     }
 
     // GET /api/stream/notifications
+    @Operation(summary = "Open SSE stream for real-time notification delivery")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "SSE stream established")
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Bad Request — missing or invalid X-User-Id")
     @GetMapping(value = "/stream/notifications",
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamNotifications(
-            @RequestHeader("X-User-Id") String userId) {
+            @RequestHeader("X-User-Id")
+            @NotBlank(message = "X-User-Id must not be blank")
+            @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
+            String userId) {
 
         log.info("User {} connected to SSE stream", userId);
 
-        long unreadCount = notificationService.getUnreadCount(userId);
+        // Fetch unread count best-effort — a MongoDB failure must not prevent
+        // the SSE connection from being established; client will receive a count
+        // of 0 and can refresh on reconnect.
+        long unreadCount = 0;
+        try {
+            unreadCount = notificationService.getUnreadCount(userId);
+        } catch (Exception e) {
+            log.warn("Could not fetch unread count for SSE init for user {} — defaulting to 0", userId, e);
+        }
+
         return sseService.connect(userId, unreadCount);
     }
 }

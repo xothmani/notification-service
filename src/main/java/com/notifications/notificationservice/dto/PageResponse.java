@@ -1,5 +1,7 @@
 package com.notifications.notificationservice.dto;
 
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -12,6 +14,7 @@ import java.util.List;
 @Builder
 @AllArgsConstructor
 @NoArgsConstructor
+@JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
 public class PageResponse<T> {
 
     private List<T> content;
@@ -21,6 +24,8 @@ public class PageResponse<T> {
     private int pageSize;
     private Integer nextPage;
     private Integer previousPage;
+    // null = live collection; "archive" = results came from notifications_archive fallback
+    private String source;
 
     // Convert Spring Page to our PageResponse
     public static <T> PageResponse<T> from(Page<T> page) {

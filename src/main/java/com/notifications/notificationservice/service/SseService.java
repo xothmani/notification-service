@@ -5,7 +5,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -38,7 +37,7 @@ public class SseService {
             emitter.send(SseEmitter.event()
                     .name("init")
                     .data(Map.of("unread_count", unreadCount)));
-        } catch (IOException e) {
+        } catch (Exception e) {
             log.warn("Failed to send init event to user {}", userId, e);
             emitters.remove(userId, emitter);
         }
@@ -55,12 +54,13 @@ public class SseService {
     }
 
     private void send(String userId, String eventName, Object data) {
+        if (userId == null) return;
         SseEmitter emitter = emitters.get(userId);
         if (emitter == null) return;
 
         try {
             emitter.send(SseEmitter.event().name(eventName).data(data));
-        } catch (IOException e) {
+        } catch (Exception e) {
             log.warn("SSE send failed for user {} event {} — removing emitter",
                     userId, eventName, e);
             emitters.remove(userId, emitter);

@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.notifications.notificationservice.dto.NotificationResponse;
 import com.notifications.notificationservice.dto.PageResponse;
+import com.notifications.notificationservice.util.RedisKeyValidator;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
@@ -14,6 +16,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CacheService {
@@ -29,13 +32,32 @@ public class CacheService {
     // --- Unread count ---
 
     public void saveUnreadCount(String userId, long count) {
-        redisTemplate.opsForValue().set(UNREAD_COUNT_KEY + userId, count, CACHE_TTL);
+        RedisKeyValidator.validate(userId);
+        if (redisTemplate == null) {
+            log.error("redisTemplate is null — skipping saveUnreadCount for user {}", userId);
+            return;
+        }
+        try {
+            redisTemplate.opsForValue().set(UNREAD_COUNT_KEY + userId, count, CACHE_TTL);
+        } catch (Exception e) {
+            log.warn("Redis error in saveUnreadCount for user {} — skipping cache write", userId, e);
+        }
     }
 
     public Long getUnreadCount(String userId) {
-        Object value = redisTemplate.opsForValue().get(UNREAD_COUNT_KEY + userId);
-        if (value == null) return null;
-        return ((Number) value).longValue();
+        RedisKeyValidator.validate(userId);
+        if (redisTemplate == null) {
+            log.error("redisTemplate is null — returning cache miss for user {}", userId);
+            return null;
+        }
+        try {
+            Object value = redisTemplate.opsForValue().get(UNREAD_COUNT_KEY + userId);
+            if (value == null) return null;
+            return ((Number) value).longValue();
+        } catch (Exception e) {
+            log.warn("Redis error in getUnreadCount for user {} — returning cache miss", userId, e);
+            return null;
+        }
     }
 
     // --- Notification pages ---
@@ -47,26 +69,45 @@ public class CacheService {
     public String buildNotificationCacheKey(String userId, String organizationId,
                                             String state, String tier, String type,
                                             int page, int limit) {
-        return String.format("%s%s:%s:%s:%s:%s:%d:%d",
+        RedisKeyValidator.validate(userId);
+        String orgPart = organizationId != null ? ":" + organizationId : "";
+        return String.format("%s%s%s:%s:%s:%s:%d:%d",
                 NOTIFICATIONS_KEY,
                 userId,
-                organizationId != null ? organizationId : "",
-                state          != null ? state          : "",
-                tier           != null ? tier           : "",
-                type           != null ? type           : "",
+                orgPart,
+                state != null ? state : "",
+                tier  != null ? tier  : "",
+                type  != null ? type  : "",
                 page, limit);
     }
 
     public void saveNotifications(String cacheKey,
                                   PageResponse<NotificationResponse> data) {
-        redisTemplate.opsForValue().set(cacheKey, data, CACHE_TTL);
+        if (redisTemplate == null) {
+            log.error("redisTemplate is null — skipping saveNotifications for key {}", cacheKey);
+            return;
+        }
+        try {
+            redisTemplate.opsForValue().set(cacheKey, data, CACHE_TTL);
+        } catch (Exception e) {
+            log.warn("Redis error in saveNotifications for key {} — skipping cache write", cacheKey, e);
+        }
     }
 
     public PageResponse<NotificationResponse> getNotifications(String cacheKey) {
-        Object raw = redisTemplate.opsForValue().get(cacheKey);
-        if (raw == null) return null;
-        return objectMapper.convertValue(
-                raw, new TypeReference<PageResponse<NotificationResponse>>() {});
+        if (redisTemplate == null) {
+            log.error("redisTemplate is null — returning cache miss for key {}", cacheKey);
+            return null;
+        }
+        try {
+            Object raw = redisTemplate.opsForValue().get(cacheKey);
+            if (raw == null) return null;
+            return objectMapper.convertValue(
+                    raw, new TypeReference<PageResponse<NotificationResponse>>() {});
+        } catch (Exception e) {
+            log.warn("Redis error in getNotifications for key {} — returning cache miss", cacheKey, e);
+            return null;
+        }
     }
 
     // --- Invalidation ---
@@ -74,20 +115,36 @@ public class CacheService {
     /**
      * Delete the unread count and ALL notification page caches for a user.
      * Uses Redis SCAN (non-blocking, cursor-based) — safe for production.
+     * Best-effort: Redis failures are logged but never propagated to the caller.
      */
     public void invalidateUserCache(String userId) {
-        redisTemplate.delete(UNREAD_COUNT_KEY + userId);
-
-        String pattern = NOTIFICATIONS_KEY + userId + ":*";
-        ScanOptions options = ScanOptions.scanOptions().match(pattern).count(100).build();
-
-        List<String> keysToDelete = new ArrayList<>();
-        try (Cursor<String> cursor = redisTemplate.scan(options)) {
-            cursor.forEachRemaining(keysToDelete::add);
+        RedisKeyValidator.validate(userId);
+        if (redisTemplate == null) {
+            log.error("redisTemplate is null — skipping invalidateUserCache for user {}", userId);
+            return;
+        }
+        try {
+            redisTemplate.delete(UNREAD_COUNT_KEY + userId);
+        } catch (Exception e) {
+            log.warn("Redis error deleting unread count for user {} — cache may be stale until TTL", userId, e);
         }
 
-        if (!keysToDelete.isEmpty()) {
-            redisTemplate.delete(keysToDelete);
+        try {
+            String pattern = NOTIFICATIONS_KEY + userId + ":*";
+            ScanOptions options = ScanOptions.scanOptions().match(pattern).count(100).build();
+
+            List<String> keysToDelete = new ArrayList<>();
+            try (Cursor<String> cursor = redisTemplate.scan(options)) {
+                while (cursor.hasNext()) {
+                    keysToDelete.add(cursor.next());
+                }
+            }
+
+            if (!keysToDelete.isEmpty()) {
+                redisTemplate.delete(keysToDelete);
+            }
+        } catch (Exception e) {
+            log.warn("Redis error scanning/deleting notification keys for user {} — cache may be stale until TTL", userId, e);
         }
     }
 }

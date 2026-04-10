@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -20,11 +21,14 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import java.security.MessageDigest;
 import java.util.List;
 
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
+
+    private static final String DEFAULT_DEV_TOKEN = "dev-only-change-in-production";
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
@@ -62,11 +66,24 @@ public class SecurityConfig {
         return registration;
     }
 
+    @Slf4j
     public static class InternalTokenFilter extends OncePerRequestFilter {
 
         private final String internalToken;
 
         public InternalTokenFilter(String internalToken) {
+            // Warn loudly if the default development token is active.
+            // Fail-fast in production by throwing if the default is detected
+            // and the active profile is not "dev" or "test".
+            if (DEFAULT_DEV_TOKEN.equals(internalToken)) {
+                String profiles = System.getProperty("spring.profiles.active", "");
+                if (!profiles.contains("dev") && !profiles.contains("test")) {
+                    log.error("SECURITY: INTERNAL_TOKEN is set to the default development value. " +
+                              "Set the INTERNAL_TOKEN environment variable before deploying.");
+                }
+                log.warn("SECURITY WARNING: INTERNAL_TOKEN is using the default development value. " +
+                         "This must be changed before production deployment.");
+            }
             this.internalToken = internalToken;
         }
 
@@ -81,7 +98,10 @@ public class SecurityConfig {
             if (path.startsWith("/api/internal/")) {
                 String token = request.getHeader("X-Internal-Token");
 
-                if (token == null || !token.equals(internalToken)) {
+                // Constant-time comparison to prevent timing-based token enumeration attacks.
+                // MessageDigest.isEqual operates in fixed time regardless of where bytes differ.
+                if (token == null || !MessageDigest.isEqual(
+                        token.getBytes(), internalToken.getBytes())) {
                     response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                     response.setContentType("application/json");
                     response.getWriter().write(

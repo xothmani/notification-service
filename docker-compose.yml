@@ -14,6 +14,9 @@ services:
     container_name: notification-redis
     ports:
       - "6379:6379"
+    # allkeys-lru evicts the least-recently-used key when maxmemory is reached,
+    # preventing OOM errors that would block all writes and cause 500s.
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
 
 volumes:
   mongodb_data:

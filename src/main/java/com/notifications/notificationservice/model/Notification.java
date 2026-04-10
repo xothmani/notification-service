@@ -20,6 +20,7 @@ import java.util.Map;
 @NoArgsConstructor
 @Document(collection = "notifications")
 @CompoundIndex(name = "recipient_state_idx", def = "{'recipient_id': 1, 'state': 1}")
+@CompoundIndex(name = "broadcast_recipient_unique_idx", def = "{'broadcast_id': 1, 'recipient_id': 1}", unique = true)
 public class Notification {
 
     @Id
