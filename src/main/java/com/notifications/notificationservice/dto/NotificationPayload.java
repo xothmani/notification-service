@@ -60,7 +60,7 @@ public class NotificationPayload {
 
     @NotBlank
     @Size(max = 200, message = "redirectUri must not exceed 200 characters")
-    @Pattern(regexp = "^https?://.*", message = "redirectUri must be a valid http/https URL")
+    @Pattern(regexp = "^(https?://|/).*", message = "redirectUri must be a valid absolute or relative URL")
     @JsonProperty("redirect_uri")
     private String redirectUri;
 

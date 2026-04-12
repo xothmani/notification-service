@@ -183,6 +183,8 @@ public class NotificationWorker {
         // retry loop so the job is retried or moved to DLQ.
         notification = notificationRepository.save(notification);
 
+        List<String> channels = payload.getChannels();
+
         // Cache refresh is best-effort. Wrapping in try-catch ensures a Redis
         // failure does NOT propagate to the retry loop — which would cause the
         // MongoDB save above (already persisted) to be executed again on retry,
@@ -190,21 +192,26 @@ public class NotificationWorker {
         try {
             cacheService.invalidateUserCache(recipientId);
 
-            // FIX 6: Atomically increment the unread counter document via $inc.
-            // This avoids a full collection scan on countByRecipientIdAndState.
-            UserNotificationCount counter = mongoTemplate.findAndModify(
+            // Atomically increment the unread counter document via $inc.
+            // Invalidate the cached count — do NOT write the new value back to Redis.
+            // A post-increment write would be non-atomic from Redis's perspective:
+            // another concurrent $inc could land between our DB write and our cache
+            // write, leaving Redis with a stale value. Deletion is always safe;
+            // the next getUnreadCount() will miss the cache and fetch fresh from MongoDB.
+            mongoTemplate.findAndModify(
                     new Query(Criteria.where("_id").is(recipientId)),
                     new Update().inc("count", 1),
                     FindAndModifyOptions.options().returnNew(true).upsert(true),
                     UserNotificationCount.class);
-            long unreadCount = counter != null ? counter.getCount() : 0L;
-            cacheService.saveUnreadCount(recipientId, unreadCount);
 
-            // IN_APP — push via SSE if user is connected
-            List<String> channels = payload.getChannels();
-            if (channels.contains("IN_APP")) {
+            // IN_APP — push via SSE if user is connected.
+            // Use the $inc result for the SSE event; it is best-effort and the
+            // client will re-fetch on the next getNotifications() call anyway.
+            if (channels != null && channels.contains("IN_APP")) {
                 sseService.pushNotification(
                         recipientId, notificationService.mapToResponse(notification));
+                // Fetch the fresh count from MongoDB (cache-aside) for the SSE push
+                long unreadCount = notificationService.getUnreadCount(recipientId);
                 sseService.pushUnreadCount(recipientId, unreadCount);
             }
         } catch (Exception e) {
@@ -213,17 +220,17 @@ public class NotificationWorker {
         }
 
         // EMAIL — placeholder (implement with SendGrid)
-        if (payload.getChannels().contains("EMAIL")) {
+        if (channels != null && channels.contains("EMAIL")) {
             log.info("EMAIL channel — to be implemented with SendGrid");
         }
 
         // SMS — placeholder (implement with Twilio)
-        if (payload.getChannels().contains("SMS")) {
+        if (channels != null && channels.contains("SMS")) {
             log.info("SMS channel — to be implemented with Twilio");
         }
 
         // PUSH — placeholder (implement with FCM)
-        if (payload.getChannels().contains("PUSH")) {
+        if (channels != null && channels.contains("PUSH")) {
             log.info("PUSH channel — to be implemented with FCM");
         }
     }

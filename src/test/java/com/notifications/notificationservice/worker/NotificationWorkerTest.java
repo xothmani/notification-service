@@ -37,6 +37,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -290,6 +291,22 @@ class NotificationWorkerTest {
             verify(notificationRepository, never()).save(any());
             verify(listOps).rightPush(eq(DLQ_KEY), any());
         }
+
+        @Test
+        void invalidRedirectUri_goesToDlqWithoutMongoSave() throws Exception {
+            NotificationPayload bad = NotificationPayload.builder()
+                    .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
+                    .tier("T").type("T").title("T").description("D")
+                    .redirectUri("not-a-url").organizationId("org1").build();
+
+            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
+            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
+
+            worker.processQueue();
+
+            verify(notificationRepository, never()).save(any());
+            verify(listOps).rightPush(eq(DLQ_KEY), any());
+        }
     }
 
     // ===================================================================
@@ -297,38 +314,53 @@ class NotificationWorkerTest {
     // ===================================================================
 
     @Test
-    void happyPath_savesToMongoAndRefreshesCache() throws Exception {
-        UserNotificationCount counter = UserNotificationCount.builder().userId("user1").count(1L).build();
+    void relativeRedirectUri_passesValidationAndSavesToMongo() throws Exception {
+        NotificationPayload relativeUri = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("/surveys/q3-eng").channels(List.of("IN_APP")).build();
+
         when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(relativeUri);
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(mongoTemplate.findAndModify(any(Query.class), any(Update.class),
-                any(FindAndModifyOptions.class), eq(UserNotificationCount.class)))
-                .thenReturn(counter);
-
-        worker.processQueue();
-
-        verify(notificationRepository, times(1)).save(any());
-        verify(cacheService).invalidateUserCache("user1");
-        verify(cacheService).saveUnreadCount("user1", 1L);
-    }
-
-    @Test
-    void happyPath_inAppChannel_pushesViaSse() throws Exception {
-        UserNotificationCount counter = UserNotificationCount.builder().userId("user1").count(1L).build();
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
-        when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(mongoTemplate.findAndModify(any(Query.class), any(Update.class),
-                any(FindAndModifyOptions.class), eq(UserNotificationCount.class)))
-                .thenReturn(counter);
         when(notificationService.mapToResponse(any()))
                 .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
 
         worker.processQueue();
 
+        verify(notificationRepository, times(1)).save(any());
+        verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+    }
+
+    @Test
+    void happyPath_savesToMongoAndRefreshesCache() throws Exception {
+        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
+        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+
+        worker.processQueue();
+
+        verify(notificationRepository, times(1)).save(any());
+        // Worker invalidates the cache — it does NOT write a new value back to Redis
+        // because the $inc + Redis write is not atomic. The next read will miss and
+        // re-populate from MongoDB.
+        verify(cacheService).invalidateUserCache("user1");
+        verify(cacheService, never()).saveUnreadCount(anyString(), anyLong());
+    }
+
+    @Test
+    void happyPath_inAppChannel_pushesViaSse() throws Exception {
+        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
+        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(notificationService.mapToResponse(any()))
+                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
+        when(notificationService.getUnreadCount("user1")).thenReturn(3L);
+
+        worker.processQueue();
+
         verify(sseService).pushNotification(eq("user1"), any());
-        verify(sseService).pushUnreadCount("user1", 1L);
+        verify(sseService).pushUnreadCount("user1", 3L);
     }
 
     @Test

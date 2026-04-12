@@ -6,6 +6,8 @@ import com.notifications.notificationservice.dto.PageResponse;
 import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -37,21 +39,29 @@ public class NotificationController {
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "Service Unavailable — downstream store unreachable")
     @GetMapping("/notifications")
     public ResponseEntity<ApiResponse<PageResponse<NotificationResponse>>> getNotifications(
+            @Parameter(description = "Authenticated user ID", required = true)
             @RequestHeader("X-User-Id")
             @NotBlank(message = "X-User-Id must not be blank")
             @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
             String userId,
+            @Parameter(description = "Filter by organization ID")
             @RequestParam(required = false) String organizationId,
+            @Parameter(description = "Filter by notification state",
+                       schema = @Schema(allowableValues = {"UNSEEN", "SEEN", "CLICKED"}))
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "state must match ^[A-Z_]+$")
             String state,
+            @Parameter(description = "Filter by notification tier. Any uppercase string with underscores.")
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "tier must match ^[A-Z_]+$")
             String tier,
+            @Parameter(description = "Filter by notification type. Any uppercase string with underscores.")
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "type must match ^[A-Z_]+$")
             String type,
+            @Parameter(description = "Page number (default: 1, minimum: 1)")
             @RequestParam(defaultValue = "1")  @Min(1)           int page,
+            @Parameter(description = "Page size (default: 10, minimum: 1, maximum: 100)")
             @RequestParam(defaultValue = "10") @Min(1) @Max(100) int limit) {
 
         PageResponse<NotificationResponse> response =
@@ -69,10 +79,12 @@ public class NotificationController {
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "Service Unavailable")
     @PatchMapping("/notifications/{notificationId}/clicked")
     public ResponseEntity<ApiResponse<NotificationResponse>> markAsClicked(
+            @Parameter(description = "Authenticated user ID", required = true)
             @RequestHeader("X-User-Id")
             @NotBlank(message = "X-User-Id must not be blank")
             @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
             String userId,
+            @Parameter(description = "ID of the notification to mark as clicked", required = true)
             @PathVariable
             @NotBlank(message = "notificationId must not be blank")
             String notificationId) {
@@ -91,6 +103,7 @@ public class NotificationController {
     @GetMapping(value = "/stream/notifications",
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamNotifications(
+            @Parameter(description = "Authenticated user ID", required = true)
             @RequestHeader("X-User-Id")
             @NotBlank(message = "X-User-Id must not be blank")
             @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
