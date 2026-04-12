@@ -59,7 +59,6 @@ RPUSH notifications_queue '{...}'
 | `GET`   | `/api/stream/notifications`                           | Open SSE stream for real-time push  |
 | `GET`   | `/api/internal/notifications/broadcast/{id}/stats`    | Broadcast delivery stats (internal) |
 
-Full interactive docs available at [`/swagger-ui.html`](http://localhost:8080/swagger-ui.html).
 
 ## Architecture
 
