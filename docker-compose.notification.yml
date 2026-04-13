@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  notification-service:
+    image: notification-service:latest
+    container_name: notification-service
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_DATA_MONGODB_URI: "mongodb://notification-mongodb:27017/notification_db?connectTimeoutMS=2000&socketTimeoutMS=5000&serverSelectionTimeoutMS=3000"
+      SPRING_DATA_REDIS_HOST: notification-redis
+      SPRING_DATA_REDIS_PORT: 6379
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-only-change-in-production}
+    networks:
+      - notification
+
+networks:
+  notification:
+    external: true
