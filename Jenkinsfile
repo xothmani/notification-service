@@ -1,4 +1,10 @@
-@Library('hippo-jenkins-shared@master') _
+@Library('hippo-jenkins-shared@master', 
+        retriever: modernSCM([
+            $class: 'GitSCMSource',
+            remote: 'https://github.com/hippo-labs-inc/jenkins-shared.git',
+            credentialsId: 'Jenkins-Github-App',
+            traits: [[$class: 'jenkins.plugins.git.traits.BranchDiscoveryTrait']]
+        ])
 
 pipeline {
 
