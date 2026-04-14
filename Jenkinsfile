@@ -44,9 +44,13 @@ pipeline {
         }
 
         stage('OWASP Dependency Scan') {
+            environment {
+                OWASP_INSTALLATION_ID = "owasp-12.1.0"
+                NVD_API_KEY = credentials('NVD_API_KEY')
+            }
             steps {
                 script{
-                    owaspDependencyCheck(dirPath: serviceDirPath, nvdApiKey: owsapNvdApiKey, scanPath: 'target/**/*.jar', owaspInstallation: owaspInstallationId,
+                    owaspDependencyCheck(dirPath: '.', nvdApiKey: NVD_API_KEY, scanPath: 'target/**/*.jar', owaspInstallation: OWASP_INSTALLATION_ID,
                         failedTotalCritical: 1,
                         failedTotalHigh: 4,
                         failedTotalMedium: 8,
@@ -88,6 +92,11 @@ pipeline {
                     )
                 }
             }
+        }
+    }
+    post {
+        always {
+            cleanWs()
         }
     }
 }
