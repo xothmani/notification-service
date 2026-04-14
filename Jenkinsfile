@@ -17,6 +17,7 @@ pipeline {
 
     tools {
         maven '3.9.14'
+        jdk '21.0.10+7'
     }
     
     environment {
