@@ -34,6 +34,7 @@ pipeline {
         NEXUS_URL = "nexus.atlas-labs.org"
         NEXUS_CREDS_ID = "nexus"
         PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
+        DOCKER_CONFIG = "/tmp/docker-config-${BUILD_NUMBER}"
     }
 
     stages{
@@ -72,31 +73,26 @@ pipeline {
 
         stage('Generate Docker Image'){
             steps{
-                script{
-                    dockerLib.loginAndBuild(dirPath: ".", credentialsId: NEXUS_CREDS_ID,
-                        nexusUrl: NEXUS_URL,
-                        nexusRepository: NEXUS_REPOSITORY,
-                        dockerImageName: DOCKER_IMAGE_NAME,
-                        dockerImageVersion: DOCKER_IMAGE_VERSION
-                    )
+                withCredentials([usernamePassword(credentialsId: NEXUS_CREDS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh """
+                        mkdir -p ${DOCKER_CONFIG}
+                        echo '{"auths":{}}' > ${DOCKER_CONFIG}/config.json
+                        echo \$DOCKER_PASS | docker login ${NEXUS_URL} -u \$DOCKER_USER --password-stdin
+                        docker build -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION} .
+                    """
                 }
             }
         }
 
         stage('Push Docker Image'){
             steps{
-                script{
-                    dockerLib.push(nexusUrl: NEXUS_URL,
-                        nexusRepository: NEXUS_REPOSITORY,
-                        dockerImageName: DOCKER_IMAGE_NAME,
-                        dockerImageVersion: DOCKER_IMAGE_VERSION
-                    )
-                }
+                sh "docker push ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION}"
             }
         }
     }
     post {
         always {
+            sh "rm -rf ${DOCKER_CONFIG} || true"
             cleanWs()
         }
     }
