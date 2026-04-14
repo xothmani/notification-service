@@ -76,8 +76,8 @@ pipeline {
                 withCredentials([usernamePassword(credentialsId: NEXUS_CREDS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh """
                         mkdir -p ${DOCKER_CONFIG}
-                        echo '{"auths":{}}' > ${DOCKER_CONFIG}/config.json
-                        echo \$DOCKER_PASS | docker login ${NEXUS_URL} -u \$DOCKER_USER --password-stdin
+                        AUTH=\$(printf '%s:%s' "\$DOCKER_USER" "\$DOCKER_PASS" | base64 | tr -d '\\n')
+                        printf '{"auths":{"%s":{"auth":"%s"}}}' "${NEXUS_URL}" "\$AUTH" > ${DOCKER_CONFIG}/config.json
                         docker build -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION} .
                     """
                 }
