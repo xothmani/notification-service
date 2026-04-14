@@ -2,7 +2,7 @@
 
 pipeline {
 
-    agent 'mac-mini'
+    agent { label 'mac-mini' }
 
     options{
         disableResume()
