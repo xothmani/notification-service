@@ -33,6 +33,7 @@ pipeline {
         DOCKER_IMAGE_VERSION = "0.0.1-test-jenkins"
         NEXUS_URL = "nexus.atlas-labs.org"
         NEXUS_CREDS_ID = "nexus"
+        PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
     }
 
     stages{
@@ -46,7 +47,7 @@ pipeline {
         stage('OWASP Dependency Scan') {
             environment {
                 OWASP_INSTALLATION_ID = "owasp-12.1.0"
-                NVD_API_KEY = credentials('NVD_API_KEY')
+                NVD_API_KEY = 'NVD_API_KEY'
             }
             steps {
                 script{
