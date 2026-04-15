@@ -81,7 +81,7 @@ pipeline {
                         mkdir -p ${DOCKER_CONFIG}
                         AUTH=\$(printf '%s:%s' "\$DOCKER_USER" "\$DOCKER_PASS" | base64 | tr -d '\\n')
                         printf '{"auths":{"%s":{"auth":"%s"}}}' "${NEXUS_URL}" "\$AUTH" > ${DOCKER_CONFIG}/config.json
-                        docker buildx build --platform linux/amd64 --load -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION} .
+                        docker build --platform linux/amd64 -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION} .
                     """
                 }
             }
