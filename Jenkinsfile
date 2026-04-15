@@ -52,14 +52,16 @@ pipeline {
                 NVD_API_KEY = 'NVD_API_KEY'
             }
             steps {
+                sh "mkdir -p /Users/jenkins/dependency-check-data"
                 script{
                     owaspDependencyCheck(dirPath: '.', nvdApiKey: NVD_API_KEY, scanPath: 'target/**/*.jar', owaspInstallation: OWASP_INSTALLATION_ID,
+                        dataDir: '/Users/jenkins/dependency-check-data',
                         failedTotalCritical: 1,
                         failedTotalHigh: 4,
                         failedTotalMedium: 8,
                         failedTotalLow: 90,
                         outputDir: './',
-                        outputFile: '**/dependency-check-report.xml',
+                        outputFile: 'dependency-check-report.xml',
                         stopBuild: true
                     )
                 }
