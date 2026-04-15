@@ -20,9 +20,10 @@ EXPOSE 8085
 #   MaxRAMPercentage=75  — allocate up to 75 % of container RAM to the heap
 #   UseZGC               — low-pause GC well-suited for latency-sensitive services (Java 21 GA)
 #   security.egd         — avoid /dev/random blocking on entropy-starved containers
-ENV JAVA_OPTS="-XX:+UseContainerSupport \
-               -XX:MaxRAMPercentage=75.0 \
-               -XX:+UseZGC \
-               -Djava.security.egd=file:/dev/./urandom"
+# JAVA_TOOL_OPTIONS is read automatically by the JVM — no shell needed to expand it
+ENV JAVA_TOOL_OPTIONS="-XX:+UseContainerSupport \
+                       -XX:MaxRAMPercentage=75.0 \
+                       -XX:+UseZGC \
+                       -Djava.security.egd=file:/dev/./urandom"
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+ENTRYPOINT ["java", "-jar", "app.jar"]
