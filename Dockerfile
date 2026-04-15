@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jre-alpine
+FROM --platform=linux/amd64 eclipse-temurin:21-jre-alpine
 
 # Non-root user for security hardening
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

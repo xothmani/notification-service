@@ -76,16 +76,20 @@ pipeline {
 
         stage('Generate Docker Image'){
             steps{
-                sh """
-                    docker rmi eclipse-temurin:21-jre-alpine || true
-                    docker pull --platform linux/amd64 eclipse-temurin:21-jre-alpine
-                """
+                script {
+                    def timestamp = sh(script: "date '+%Y-%m-%d_%H-%M-%S'", returnStdout: true).trim()
+                    env.DOCKER_IMAGE_TAG = "${DOCKER_IMAGE_VERSION}_${timestamp}"
+                }
+                // sh """
+                //     docker rmi eclipse-temurin:21-jre-alpine || true
+                //     docker pull --platform linux/amd64 eclipse-temurin:21-jre-alpine
+                // """
                 withCredentials([usernamePassword(credentialsId: NEXUS_CREDS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh """
                         mkdir -p ${DOCKER_CONFIG}
                         AUTH=\$(printf '%s:%s' "\$DOCKER_USER" "\$DOCKER_PASS" | base64 | tr -d '\\n')
                         printf '{"auths":{"%s":{"auth":"%s"}}}' "${NEXUS_URL}" "\$AUTH" > ${DOCKER_CONFIG}/config.json
-                        docker build -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION} .
+                        docker build -t ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG} .
                     """
                 }
             }
@@ -93,7 +97,7 @@ pipeline {
 
         stage('Push Docker Image'){
             steps{
-                sh "docker push ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION}"
+                sh "docker push ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG}"
             }
         }
 
@@ -120,7 +124,7 @@ pipeline {
                                     docker rm ${DOCKER_IMAGE_NAME}
                                 fi
                                 echo "${NEXUS_PASS}" | docker login ${NEXUS_URL} -u ${NEXUS_USER} --password-stdin
-                                docker pull ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION}
+                                docker pull ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG}
                                 docker run -d \\
                                     --name ${DOCKER_IMAGE_NAME} \\
                                     -p 8085:8085 \\
@@ -130,7 +134,7 @@ pipeline {
                                     -e SPRING_DATA_REDIS_PORT=6379 \\
                                     -e INTERNAL_TOKEN=${INTERNAL_TOKEN} \\
                                     --restart unless-stopped \\
-                                    ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_VERSION}
+                                    ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG}
                                 echo "Deployment complete. Container ${DOCKER_IMAGE_NAME} is running."
 ENDSSH
                         """
