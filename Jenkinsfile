@@ -48,7 +48,7 @@ pipeline {
 
         stage('OWASP Dependency Scan') {
             environment {
-                OWASP_INSTALLATION_ID = "owasp-12.1.0"
+                OWASP_INSTALLATION_ID = "owasp-12.1.1"
                 NVD_API_KEY = 'NVD_API_KEY'
             }
             steps {
