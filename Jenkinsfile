@@ -59,7 +59,7 @@ pipeline {
                         failedTotalMedium: 8,
                         failedTotalLow: 90,
                         outputDir: './',
-                        outputFile: 'dependency-check-report.xml',
+                        outputFile: '**/dependency-check-report.xml',
                         stopBuild: true
                     )
                 }
