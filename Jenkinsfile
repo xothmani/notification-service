@@ -80,10 +80,10 @@ pipeline {
                     def timestamp = sh(script: "date '+%Y-%m-%d_%H-%M-%S'", returnStdout: true).trim()
                     env.DOCKER_IMAGE_TAG = "${DOCKER_IMAGE_VERSION}_${timestamp}"
                 }
-                // sh """
-                //     docker rmi eclipse-temurin:21-jre-alpine || true
-                //     docker pull --platform linux/amd64 eclipse-temurin:21-jre-alpine
-                // """
+                sh """
+                    docker rmi eclipse-temurin:21-jre-alpine || true
+                    docker pull --platform linux/amd64 eclipse-temurin:21-jre-alpine
+                """
                 withCredentials([usernamePassword(credentialsId: NEXUS_CREDS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh """
                         mkdir -p ${DOCKER_CONFIG}
