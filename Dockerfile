@@ -1,28 +1,12 @@
-# ─── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk-alpine AS builder
-
-WORKDIR /app
-
-# Copy Maven wrapper and pom.xml first — Docker caches this layer until pom.xml changes
-COPY .mvn/ .mvn/
-COPY mvnw pom.xml ./
-
-# Resolve all dependencies offline so subsequent builds are fast
-RUN chmod +x mvnw && ./mvnw dependency:go-offline -B
-
-# Copy source and produce the fat JAR (tests run in CI, not here)
-COPY src ./src
-RUN ./mvnw package -DskipTests -B
-
-# ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jre-alpine AS runtime
+FROM eclipse-temurin:21-jre-alpine
 
 # Non-root user for security hardening
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
 
-COPY --from=builder /app/target/notification-service-0.0.1-SNAPSHOT.jar app.jar
+# JAR is built by Maven in CI before this image is built
+COPY target/notification-service-0.0.1-SNAPSHOT.jar app.jar
 
 RUN chown appuser:appgroup app.jar
 
