@@ -35,6 +35,7 @@ pipeline {
         NEXUS_CREDS_ID = "nexus"
         PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
         DOCKER_CONFIG = "/tmp/docker-config-${BUILD_NUMBER}"
+        DOCKER_HOST = "unix:///Users/jenkins/.colima/default/docker.sock"
     }
 
     stages{
