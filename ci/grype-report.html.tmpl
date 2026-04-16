@@ -108,7 +108,7 @@
         <td><span class="badge {{.Vulnerability.Severity | lower}}">{{.Vulnerability.Severity}}</span></td>
         <td>
           {{if .Vulnerability.Fix.Versions}}
-          <span class="fix-ver">{{join .Vulnerability.Fix.Versions ", "}}</span>
+          <span class="fix-ver">{{range $i, $v := .Vulnerability.Fix.Versions}}{{if $i}}, {{end}}{{$v}}{{end}}</span>
           {{else}}
           <span class="no-fix">No fix available</span>
           {{end}}
