@@ -46,39 +46,27 @@ pipeline {
             }
         }
 
-        // stage('OWASP Dependency Scan') {
-        //     environment {
-        //         OWASP_INSTALLATION_ID = "owasp-12.1.1"
-        //         NVD_API_KEY = 'NVD_API_KEY'
-        //     }
-        //     steps {
-        //         sh "mkdir -p reports/owasp"
-        //         script{
-        //             owaspDependencyCheck(dirPath: '.', nvdApiKey: NVD_API_KEY, scanPath: 'target/**/*.jar', owaspInstallation: OWASP_INSTALLATION_ID,
-        //                 dataDir: '/Users/jenkins/dependency-check-data',
-        //                 failedTotalCritical: 1,
-        //                 failedTotalHigh: 4,
-        //                 failedTotalMedium: 8,
-        //                 failedTotalLow: 90,
-        //                 outputDir: 'reports/owasp',
-        //                 outputFile: 'dependency-check-report.xml',
-        //                 stopBuild: true
-        //             )
-        //         }
-        //     }
-        //     post {
-        //         always {
-        //             publishHTML(target: [
-        //                 allowMissing         : false,
-        //                 alwaysLinkToLastBuild: true,
-        //                 keepAll              : true,
-        //                 reportDir            : 'reports/owasp',
-        //                 reportFiles          : 'dependency-check-report.html',
-        //                 reportName           : 'OWASP Dependency Check Report'
-        //             ])
-        //         }
-        //     }
-        // }
+        stage('OWASP Dependency Scan') {
+            environment {
+                OWASP_INSTALLATION_ID = "owasp-12.1.1"
+                NVD_API_KEY = 'NVD_API_KEY'
+            }
+            steps {
+                sh "mkdir -p reports/owasp"
+                script{
+                    owaspDependencyCheck(dirPath: '.', nvdApiKey: NVD_API_KEY, scanPath: 'target/**/*.jar', owaspInstallation: OWASP_INSTALLATION_ID,
+                        dataDir: '/Users/jenkins/dependency-check-data',
+                        failedTotalCritical: 1,
+                        failedTotalHigh: 4,
+                        failedTotalMedium: 8,
+                        failedTotalLow: 90,
+                        outputDir: 'reports/owasp',
+                        outputFile: 'dependency-check-report.xml',
+                        stopBuild: true
+                    )
+                }
+            }
+        }
 
         stage('Unit Tests') {
             steps{
@@ -124,10 +112,6 @@ pipeline {
                     def timestamp = sh(script: "date '+%Y-%m-%d_%H-%M-%S'", returnStdout: true).trim()
                     env.DOCKER_IMAGE_TAG = "${DOCKER_IMAGE_VERSION}_${timestamp}"
                 }
-                // sh """
-                //     docker rmi eclipse-temurin:21-jre-alpine || true
-                //     docker pull --platform linux/amd64 eclipse-temurin:21-jre-alpine
-                // """
                 withCredentials([usernamePassword(credentialsId: NEXUS_CREDS_ID, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh """
                         mkdir -p ${DOCKER_CONFIG}
