@@ -229,6 +229,7 @@ ENDSSH
                     sleep 2
                     sh """
                         mkdir -p reports/zap
+                        chmod 777 reports/zap
                         docker run --rm \
                             -v \$(pwd)/reports/zap:/zap/wrk/:rw \
                             ghcr.io/zaproxy/zaproxy:stable \
