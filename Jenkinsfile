@@ -74,6 +74,24 @@ pipeline {
             }
         }
 
+        stage('Coverage') {
+            steps{
+                sh "mvn jacoco:report"
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing         : false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'target/site/jacoco',
+                        reportFiles          : 'index.html',
+                        reportName           : 'JaCoCo Coverage Report'
+                    ])
+                }
+            }
+        }
+
         stage('Generate Docker Image'){
             steps{
                 script {
