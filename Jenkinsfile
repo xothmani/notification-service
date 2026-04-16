@@ -70,7 +70,20 @@ pipeline {
 
         stage('Unit Tests') {
             steps{
-                sh "mvn test"
+                sh "mvn test surefire-report:report-only"
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: false
+                    publishHTML(target: [
+                        allowMissing         : false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'target/site',
+                        reportFiles          : 'surefire-report.html',
+                        reportName           : 'Unit Test Report'
+                    ])
+                }
             }
         }
 
@@ -120,9 +133,9 @@ pipeline {
         }
 
         stage('Deploy') {
-            // when {
-            //     branch 'develop'
-            // }
+            when {
+                branch 'develop'
+            }
             environment {
                 DEPLOY_SERVER = '65.108.127.117' 
                 DEPLOY_USER   = 'houssem'
