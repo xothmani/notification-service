@@ -133,9 +133,24 @@ pipeline {
                     syft ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG} \
                         -o cyclonedx-json > sbom.json
                     grype sbom:./sbom.json \
+                        --output "template=grype-report.html" \
+                        --template ci/grype-report.html.tmpl
+                    grype sbom:./sbom.json \
                         --output table \
                         --fail-on critical
                 """
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing         : false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : '.',
+                        reportFiles          : 'grype-report.html',
+                        reportName           : 'Security Scan Report'
+                    ])
+                }
             }
         }
 
