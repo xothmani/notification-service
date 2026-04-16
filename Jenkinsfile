@@ -127,6 +127,18 @@ pipeline {
             }
         }
 
+        stage('Image Security Scan') {
+            steps {
+                sh """
+                    syft ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG} \
+                        -o cyclonedx-json > sbom.json
+                    grype sbom:./sbom.json \
+                        --output table \
+                        --fail-on critical
+                """
+            }
+        }
+
         stage('Push Docker Image'){
             steps{
                 sh "docker push ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG}"
