@@ -1,0 +1,8 @@
+target/*
+!target/*.jar
+.git/
+.github/
+.idea/
+*.iml
+*.md
+docker-compose.notification.yml
