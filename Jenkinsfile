@@ -70,7 +70,8 @@ pipeline {
 
         stage('Unit Tests') {
             steps{
-                sh "mvn test surefire-report:report-only"
+                sh "mvn test"
+                sh "mvn surefire-report:report-only site:site -DgenerateReports=false"
             }
             post {
                 always {
