@@ -165,7 +165,7 @@ pipeline {
                 branch 'develop'
             }
             environment {
-                DEPLOY_SERVER = '65.108.127.117' 
+                DEPLOY_SERVER = '65.108.127.117'
                 DEPLOY_USER   = 'houssem'
             }
             steps {
@@ -198,6 +198,43 @@ pipeline {
 ENDSSH
                         """
                     }
+                }
+            }
+        }
+
+        stage('DAST — ZAP Baseline Scan') {
+            when {
+                branch 'develop'
+            }
+            environment {
+                DEPLOY_SERVER = '65.108.127.117'
+                ZAP_TARGET    = 'http://65.108.127.117:8085'
+            }
+            steps {
+                sleep 10
+                retry(3) {
+                    sleep 2
+                    sh """
+                        docker run --rm \
+                            -v \$(pwd):/zap/wrk/:rw \
+                            ghcr.io/zaproxy/zaproxy:stable \
+                            zap-baseline.py \
+                                -t ${ZAP_TARGET} \
+                                -r zap-report.html \
+                                -I
+                    """
+                }
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : '.',
+                        reportFiles          : 'zap-report.html',
+                        reportName           : 'ZAP DAST Report'
+                    ])
                 }
             }
         }
