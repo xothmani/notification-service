@@ -52,7 +52,7 @@ pipeline {
         //         NVD_API_KEY = 'NVD_API_KEY'
         //     }
         //     steps {
-        //         // sh "mkdir -p /Users/jenkins/dependency-check-data"
+        //         sh "mkdir -p reports/owasp"
         //         script{
         //             owaspDependencyCheck(dirPath: '.', nvdApiKey: NVD_API_KEY, scanPath: 'target/**/*.jar', owaspInstallation: OWASP_INSTALLATION_ID,
         //                 dataDir: '/Users/jenkins/dependency-check-data',
@@ -60,10 +60,22 @@ pipeline {
         //                 failedTotalHigh: 4,
         //                 failedTotalMedium: 8,
         //                 failedTotalLow: 90,
-        //                 outputDir: './',
+        //                 outputDir: 'reports/owasp',
         //                 outputFile: 'dependency-check-report.xml',
         //                 stopBuild: true
         //             )
+        //         }
+        //     }
+        //     post {
+        //         always {
+        //             publishHTML(target: [
+        //                 allowMissing         : false,
+        //                 alwaysLinkToLastBuild: true,
+        //                 keepAll              : true,
+        //                 reportDir            : 'reports/owasp',
+        //                 reportFiles          : 'dependency-check-report.html',
+        //                 reportName           : 'OWASP Dependency Check Report'
+        //             ])
         //         }
         //     }
         // }
@@ -130,10 +142,11 @@ pipeline {
         stage('Image Security Scan') {
             steps {
                 sh """
+                    mkdir -p reports/grype
                     syft ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG} \
                         -o cyclonedx-json > sbom.json
                     grype sbom:./sbom.json \
-                        --output "template=grype-report.html" \
+                        --output "template=reports/grype/index.html" \
                         --template ci/grype-report.html.tmpl
                     grype sbom:./sbom.json \
                         --output table \
@@ -146,8 +159,8 @@ pipeline {
                         allowMissing         : false,
                         alwaysLinkToLastBuild: true,
                         keepAll              : true,
-                        reportDir            : '.',
-                        reportFiles          : 'grype-report.html',
+                        reportDir            : 'reports/grype',
+                        reportFiles          : 'index.html',
                         reportName           : 'Security Scan Report'
                     ])
                 }
@@ -215,12 +228,13 @@ ENDSSH
                 retry(3) {
                     sleep 2
                     sh """
+                        mkdir -p reports/zap
                         docker run --rm \
-                            -v \$(pwd):/zap/wrk/:rw \
+                            -v \$(pwd)/reports/zap:/zap/wrk/:rw \
                             ghcr.io/zaproxy/zaproxy:stable \
                             zap-baseline.py \
                                 -t ${ZAP_TARGET} \
-                                -r zap-report.html \
+                                -r index.html \
                                 -I
                     """
                 }
@@ -231,8 +245,8 @@ ENDSSH
                         allowMissing         : true,
                         alwaysLinkToLastBuild: true,
                         keepAll              : true,
-                        reportDir            : '.',
-                        reportFiles          : 'zap-report.html',
+                        reportDir            : 'reports/zap',
+                        reportFiles          : 'index.html',
                         reportName           : 'ZAP DAST Report'
                     ])
                 }
