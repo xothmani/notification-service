@@ -30,7 +30,7 @@ pipeline {
     environment {
         NEXUS_REPOSITORY = "survey-notification-service"
         DOCKER_IMAGE_NAME = "notification-service"
-        DOCKER_IMAGE_VERSION = "0.0.1-test-jenkins"
+        DOCKER_IMAGE_VERSION = "0.0.1-${env.BRANCH_NAME}"
         NEXUS_URL = "nexus.atlas-labs.org"
         NEXUS_CREDS_ID = "nexus"
         PATH = "/usr/local/bin:/opt/homebrew/bin:${env.PATH}"
@@ -47,6 +47,9 @@ pipeline {
         }
 
         stage('OWASP Dependency Scan') {
+            when { 
+                branch 'PR-*' 
+            }
             environment {
                 OWASP_INSTALLATION_ID = "owasp-12.1.1"
                 NVD_API_KEY = 'NVD_API_KEY'
@@ -69,6 +72,9 @@ pipeline {
         }
 
         stage('Unit Tests') {
+            when { 
+                branch 'PR-*' 
+            }
             steps{
                 sh "mvn test"
                 sh "mvn surefire-report:report-only site:site -DgenerateReports=false"
@@ -89,6 +95,9 @@ pipeline {
         }
 
         stage('Coverage') {
+            when { 
+                branch 'PR-*' 
+            }
             steps{
                 sh "mvn jacoco:report"
             }
@@ -124,6 +133,9 @@ pipeline {
         }
 
         stage('Image Security Scan') {
+            when { 
+                branch 'PR-*' 
+            }
             steps {
                 sh """
                     mkdir -p reports/grype
@@ -152,6 +164,9 @@ pipeline {
         }
 
         stage('Push Docker Image'){
+            when { 
+                branch 'develop' 
+            }
             steps{
                 sh "docker push ${NEXUS_URL}/repository/${NEXUS_REPOSITORY}/${DOCKER_IMAGE_NAME}:${env.DOCKER_IMAGE_TAG}"
             }
