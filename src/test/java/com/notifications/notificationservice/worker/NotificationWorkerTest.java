@@ -1,10 +1,11 @@
 package com.notifications.notificationservice.worker;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.notifications.notificationservice.dto.NotificationPayload;
+import com.notifications.notificationservice.dto.NotificationResponse;
 import com.notifications.notificationservice.model.FailedNotification;
 import com.notifications.notificationservice.model.Notification;
-import com.notifications.notificationservice.model.UserNotificationCount;
 import com.notifications.notificationservice.repository.FailedNotificationRepository;
 import com.notifications.notificationservice.repository.NotificationRepository;
 import com.notifications.notificationservice.service.CacheService;
@@ -23,14 +24,15 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DuplicateKeyException;
-import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -40,365 +42,349 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+@SuppressWarnings({"rawtypes", "unchecked"})
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class NotificationWorkerTest {
 
-    @Mock RedisTemplate<String, Object> redisTemplate;
-    @Mock NotificationRepository notificationRepository;
-    @Mock FailedNotificationRepository failedNotificationRepository;
-    @Mock CacheService cacheService;
-    @Mock SseService sseService;
-    @Mock NotificationService notificationService;
-    @Mock ObjectMapper objectMapper;
+    @Mock RedisTemplate<String, Object>  redisTemplate;
+    @Mock NotificationRepository         notificationRepository;
+    @Mock FailedNotificationRepository   failedNotificationRepository;
+    @Mock CacheService                   cacheService;
+    @Mock SseService                     sseService;
+    @Mock NotificationService            notificationService;
+    @Mock ObjectMapper                   objectMapper;
+    @Mock MongoTemplate                  mongoTemplate;
+    @Mock StringRedisTemplate            stringRedisTemplate;
+    @Mock org.springframework.data.redis.core.StreamOperations streamOps;
     @Mock ListOperations<String, Object> listOps;
-    @Mock MongoTemplate mongoTemplate;
 
-    // Use the real validator so @NotBlank, @Size, @Pattern etc. are actually enforced
     private static final jakarta.validation.Validator REAL_VALIDATOR =
             Validation.buildDefaultValidatorFactory().getValidator();
 
-    // Worker is constructed manually so we can inject the real validator
+    private static final String   STREAM_KEY   = "notifications_stream";
+    private static final String   DLQ_KEY      = "notifications_dlq";
+    private static final String   CONSUMER_GRP = "notification-group";
+    private static final RecordId RECORD_ID    = RecordId.of("1234567890-0");
+
     NotificationWorker worker;
 
-    private static final String QUEUE_KEY = "notifications_queue";
-    private static final String DLQ_KEY   = "notifications_dlq";
-
     private NotificationPayload validPayload;
-    private Notification savedNotification;
-    private Object rawJob;
+    private Notification        savedNotification;
 
     @BeforeEach
     void setUp() {
+        // doReturn bypasses Mockito's generic-type check when stubbing opsForStream()
+        doReturn(streamOps).when(stringRedisTemplate).opsForStream();
         when(redisTemplate.opsForList()).thenReturn(listOps);
 
         worker = new NotificationWorker(
                 redisTemplate, notificationRepository, failedNotificationRepository,
                 cacheService, sseService, notificationService, objectMapper,
-                REAL_VALIDATOR, mongoTemplate);
+                REAL_VALIDATOR, mongoTemplate,
+                stringRedisTemplate, CONSUMER_GRP);
 
         validPayload = NotificationPayload.builder()
                 .recipientIds(List.of("user1"))
                 .organizationId("org1")
-                .tier("HIGH")
-                .type("ALERT")
-                .title("Test Title")
-                .description("Test Description")
+                .tier("HIGH").type("ALERT")
+                .title("Test Title").description("Test Description")
                 .redirectUri("https://example.com")
                 .channels(List.of("IN_APP"))
                 .build();
 
         savedNotification = Notification.builder()
-                .id("n1")
-                .recipientId("user1")
-                .state("UNSEEN")
-                .build();
-
-        rawJob = new Object();
+                .id("n1").recipientId("user1").state("UNSEEN").build();
     }
 
-    // ===================================================================
-    // Empty queue
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
 
-    @Test
-    void emptyQueue_doesNothing() {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(null);
-        worker.processQueue();
-        verifyNoInteractions(notificationRepository, objectMapper);
+    private MapRecord<String, String, String> record(Map<String, String> fields) {
+        return MapRecord.create(STREAM_KEY, fields).withId(RECORD_ID);
     }
 
-    // ===================================================================
-    // Redis queue down
-    // ===================================================================
-
-    @Test
-    void redisPollFails_returnsGracefullyWithoutProcessing() {
-        when(listOps.leftPop(QUEUE_KEY))
-                .thenThrow(new DataAccessResourceFailureException("Redis down"));
-
-        assertThatNoException().isThrownBy(() -> worker.processQueue());
-        verifyNoInteractions(notificationRepository, objectMapper);
+    private void stubValidPayload() throws Exception {
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(validPayload);
     }
 
-    // ===================================================================
-    // Malformed / invalid payloads → DLQ immediately, no MongoDB
-    // ===================================================================
+    /**
+     * Verify XACK was issued — opsForStream() is the gateway to acknowledge() in NotificationWorker.
+     * This avoids directly calling acknowledge() on a raw mock (which has two ambiguous overloads).
+     */
+    private void verifyXAckIssued() {
+        verify(stringRedisTemplate, atLeastOnce()).opsForStream();
+    }
+
+    /** Verify NO XACK was issued — message must stay pending for PendingSweeper. */
+    private void verifyNoXAck() {
+        verify(stringRedisTemplate, never()).opsForStream();
+    }
+
+    // ---------------------------------------------------------------
+    // Unrecoverable payloads → DLQ + XACK
+    // ---------------------------------------------------------------
 
     @Nested
-    class InvalidPayload {
+    class UnrecoverablePayload {
 
         @Test
-        void malformedJson_goesToDlqWithoutMongoSave() throws Exception {
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class))
-                    .thenThrow(new IllegalArgumentException("parse error"));
-
-            worker.processQueue();
+        void missingPayloadField_goesToDlqAndXAcks() {
+            worker.onMessage(record(Map.of("other", "value")));
 
             verify(notificationRepository, never()).save(any());
             verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void nullRecipientIds_goesToDlqWithoutMongoSave() throws Exception {
+        void malformedJson_goesToDlqAndXAcks() throws Exception {
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class)))
+                    .thenThrow(new JsonProcessingException("parse error") {});
+
+            worker.onMessage(record(Map.of("payload", "not-json")));
+
+            verify(notificationRepository, never()).save(any());
+            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
+        }
+
+        @Test
+        void nullRecipientIds_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(null).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T").description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void emptyRecipientIds_goesToDlqWithoutMongoSave() throws Exception {
+        void emptyRecipientIds_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of()).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T").description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void nullChannels_goesToDlqWithoutMongoSave() throws Exception {
+        void nullChannels_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(null)
                     .tier("T").type("T").title("T").description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void blankTitle_goesToDlqWithoutMongoSave() throws Exception {
+        void blankTitle_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("   ").description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void nullTitle_goesToDlqWithoutMongoSave() throws Exception {
+        void nullTitle_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title(null).description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void nullTier_goesToDlqWithoutMongoSave() throws Exception {
+        void nullTier_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier(null).type("T").title("T").description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
+            verifyXAckIssued();
         }
 
-        // FIX 8: @Size constraints
         @Test
-        void oversizedTitle_goesToDlqWithoutMongoSave() throws Exception {
+        void oversizedTitle_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T".repeat(501)).description("D")
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void oversizedDescription_goesToDlqWithoutMongoSave() throws Exception {
+        void oversizedDescription_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T").description("D".repeat(2001))
                     .redirectUri("https://x.com").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void oversizedRedirectUri_goesToDlqWithoutMongoSave() throws Exception {
+        void oversizedRedirectUri_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T").description("D")
                     .redirectUri("https://" + "x".repeat(195) + ".com")
                     .organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
 
         @Test
-        void invalidRedirectUri_goesToDlqWithoutMongoSave() throws Exception {
+        void invalidRedirectUri_goesToDlqAndXAcks() throws Exception {
             NotificationPayload bad = NotificationPayload.builder()
                     .recipientIds(List.of("user1")).channels(List.of("IN_APP"))
                     .tier("T").type("T").title("T").description("D")
                     .redirectUri("not-a-url").organizationId("org1").build();
+            when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(bad);
 
-            when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-            when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(bad);
-
-            worker.processQueue();
+            worker.onMessage(record(Map.of("payload", "{}")));
 
             verify(notificationRepository, never()).save(any());
-            verify(listOps).rightPush(eq(DLQ_KEY), any());
+            verifyXAckIssued();
         }
     }
 
-    // ===================================================================
-    // Happy path
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // Happy path — XACK on success
+    // ---------------------------------------------------------------
 
     @Test
-    void relativeRedirectUri_passesValidationAndSavesToMongo() throws Exception {
-        NotificationPayload relativeUri = NotificationPayload.builder()
-                .recipientIds(List.of("user1")).organizationId("org1")
-                .tier("HIGH").type("ALERT").title("T").description("D")
-                .redirectUri("/surveys/q3-eng").channels(List.of("IN_APP")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(relativeUri);
+    void happyPath_savesToMongoAndXAcks() throws Exception {
+        stubValidPayload();
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(notificationService.mapToResponse(any()))
-                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
         verify(notificationRepository, times(1)).save(any());
-        verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
     }
 
     @Test
-    void happyPath_savesToMongoAndRefreshesCache() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+    void happyPath_invalidatesCacheDoesNotWriteBack() throws Exception {
+        stubValidPayload();
         when(notificationRepository.save(any())).thenReturn(savedNotification);
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        verify(notificationRepository, times(1)).save(any());
-        // Worker invalidates the cache — it does NOT write a new value back to Redis
-        // because the $inc + Redis write is not atomic. The next read will miss and
-        // re-populate from MongoDB.
         verify(cacheService).invalidateUserCache("user1");
         verify(cacheService, never()).saveUnreadCount(anyString(), anyLong());
     }
 
     @Test
     void happyPath_inAppChannel_pushesViaSse() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+        stubValidPayload();
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(notificationService.mapToResponse(any()))
-                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
         when(notificationService.getUnreadCount("user1")).thenReturn(3L);
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
         verify(sseService).pushNotification(eq("user1"), any());
         verify(sseService).pushUnreadCount("user1", 3L);
     }
 
     @Test
-    void happyPath_multipleRecipients_savesForEach() throws Exception {
-        NotificationPayload multiPayload = NotificationPayload.builder()
+    void relativeRedirectUri_passesValidationAndSaves() throws Exception {
+        NotificationPayload relativeUri = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("/surveys/q3-eng").channels(List.of("IN_APP")).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(relativeUri);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(notificationRepository, times(1)).save(any());
+        verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void multipleRecipients_savesForEach() throws Exception {
+        NotificationPayload multi = NotificationPayload.builder()
                 .recipientIds(List.of("user1", "user2", "user3"))
                 .organizationId("org1").tier("HIGH").type("ALERT")
                 .title("T").description("D").redirectUri("https://x.com")
                 .channels(List.of("IN_APP")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(multiPayload);
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(multi);
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(notificationService.mapToResponse(any()))
-                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
         verify(notificationRepository, times(3)).save(any());
+        verifyXAckIssued();
     }
 
     @Test
     void threeRecipients_allShareSameBroadcastId() throws Exception {
-        // broadcastId is generated ONCE before the recipient loop — every recipient
-        // in the same broadcast must receive the identical broadcastId.
-        NotificationPayload multiPayload = NotificationPayload.builder()
+        NotificationPayload multi = NotificationPayload.builder()
                 .recipientIds(List.of("user1", "user2", "user3"))
                 .organizationId("org1").tier("HIGH").type("ALERT")
                 .title("T").description("D").redirectUri("https://x.com")
                 .channels(List.of("IN_APP")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(multiPayload);
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(multi);
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(notificationService.mapToResponse(any()))
-                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
         ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
         verify(notificationRepository, times(3)).save(captor.capture());
@@ -406,68 +392,59 @@ class NotificationWorkerTest {
         List<String> broadcastIds = captor.getAllValues().stream()
                 .map(Notification::getBroadcastId)
                 .collect(Collectors.toList());
-
         assertThat(broadcastIds).hasSize(3);
         assertThat(broadcastIds.get(0)).isNotNull();
-        assertThat(broadcastIds).containsOnly(broadcastIds.get(0)); // all three identical
+        assertThat(broadcastIds).containsOnly(broadcastIds.get(0));
     }
 
-    // ===================================================================
-    // FIX 7: Channel deduplication
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // Channel deduplication
+    // ---------------------------------------------------------------
 
     @Test
     void duplicateChannels_processedOnlyOnce() throws Exception {
-        NotificationPayload dupPayload = NotificationPayload.builder()
-                .recipientIds(List.of("user1"))
-                .organizationId("org1").tier("HIGH").type("ALERT")
+        NotificationPayload dup = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1").tier("HIGH").type("ALERT")
                 .title("T").description("D").redirectUri("https://x.com")
                 .channels(List.of("IN_APP", "IN_APP", "IN_APP")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(dupPayload);
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(dup);
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-        when(notificationService.mapToResponse(any()))
-                .thenReturn(new com.notifications.notificationservice.dto.NotificationResponse());
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        // Even though IN_APP appeared 3 times, it should be processed only once
         verify(sseService, times(1)).pushNotification(eq("user1"), any());
     }
 
-    // ===================================================================
-    // FIX 1: Per-recipient retry — DuplicateKeyException treated as success
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // DuplicateKeyException treated as idempotent success → XACK
+    // ---------------------------------------------------------------
 
     @Test
-    void duplicateKeyException_treatedAsSuccess_noRetry() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
-        // First save throws DuplicateKeyException (already persisted by previous attempt)
+    void duplicateKeyException_treatedAsSuccess_xAcks() throws Exception {
+        stubValidPayload();
         when(notificationRepository.save(any())).thenThrow(new DuplicateKeyException("dup"));
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        // DuplicateKeyException is idempotent — no DLQ push, no retry needed
         verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
     }
+
+    // ---------------------------------------------------------------
+    // Per-recipient retry — successful recipient not re-processed
+    // ---------------------------------------------------------------
 
     @Test
     void perRecipientRetry_successfulRecipientNotReprocessed() throws Exception {
-        NotificationPayload twoRecipients = NotificationPayload.builder()
+        NotificationPayload two = NotificationPayload.builder()
                 .recipientIds(List.of("user1", "user2"))
                 .organizationId("org1").tier("HIGH").type("ALERT")
                 .title("T").description("D").redirectUri("https://x.com")
                 .channels(List.of("IN_APP")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(twoRecipients);
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(two);
 
         Notification n1 = Notification.builder().id("n1").recipientId("user1").state("UNSEEN").build();
-        Notification n2 = Notification.builder().id("n2").recipientId("user2").state("UNSEEN").build();
-
-        // user1 succeeds, user2 always fails
         when(notificationRepository.save(any()))
                 .thenAnswer(inv -> {
                     Notification n = inv.getArgument(0);
@@ -475,97 +452,85 @@ class NotificationWorkerTest {
                     throw new RuntimeException("user2 Mongo fail");
                 });
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        // Capture all save invocations — user1 must appear exactly once (succeeded on first attempt,
-        // never retried); user2 will appear multiple times (retried up to MAX_RETRIES).
         ArgumentCaptor<Notification> captor = ArgumentCaptor.forClass(Notification.class);
         verify(notificationRepository, org.mockito.Mockito.atLeast(1)).save(captor.capture());
-
         long user1Saves = captor.getAllValues().stream()
                 .filter(n -> "user1".equals(n.getRecipientId())).count();
         assertThat(user1Saves).isEqualTo(1L);
     }
 
-    // ===================================================================
-    // CRITICAL: Redis failure after MongoDB save must NOT duplicate save
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // CRITICAL: Redis failure after MongoDB save must NOT trigger retry
+    // ---------------------------------------------------------------
 
     @Test
     void redisFailureAfterMongoSave_saveCalledExactlyOnce() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
+        stubValidPayload();
         when(notificationRepository.save(any())).thenReturn(savedNotification);
-
-        // Simulate Redis failure in the cache block (after save succeeds)
         doThrow(new RuntimeException("Redis connection lost"))
                 .when(cacheService).invalidateUserCache(anyString());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        // The inner try-catch in processForRecipient swallows the Redis exception.
-        // The retry loop does NOT see an exception, so save is called exactly ONCE.
+        // Redis exception is swallowed — MongoDB save happens exactly once, XACK still issued
         verify(notificationRepository, times(1)).save(any());
+        verifyXAckIssued();
     }
 
-    // ===================================================================
-    // Max retries exhausted → DLQ called exactly once
-    // ===================================================================
+    // ---------------------------------------------------------------
+    // Max retries exhausted → NO XACK (PendingSweeper retries)
+    // ---------------------------------------------------------------
 
     @Test
     @Timeout(value = 15, unit = TimeUnit.SECONDS)
-    void maxRetriesExhausted_pushToDlqCalledExactlyOnce() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(validPayload);
-        // All MongoDB saves fail — exhausts all 3 retries
+    void maxRetriesExhausted_noXAck() throws Exception {
+        stubValidPayload();
         when(notificationRepository.save(any()))
                 .thenThrow(new RuntimeException("Mongo unavailable"));
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "{}")));
 
-        // DLQ push happens exactly once after all retries are exhausted
-        verify(listOps, times(1)).rightPush(eq(DLQ_KEY), any());
-        // Save was attempted MAX_RETRIES+1 = 4 times (attempts 0, 1, 2, 3)
+        // No XACK — message stays pending for PendingSweeper
+        verifyNoXAck();
+        // Save attempted MAX_RETRIES+1 = 4 times (attempts 0, 1, 2, 3)
         verify(notificationRepository, times(4)).save(any());
     }
 
-    // ===================================================================
+    // ---------------------------------------------------------------
     // DLQ push fallback when Redis DLQ is also down
-    // ===================================================================
+    // ---------------------------------------------------------------
 
     @Test
     void dlqPushFails_fallsBackToMongoDB() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class))
-                .thenThrow(new IllegalArgumentException("bad payload"));
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class)))
+                .thenThrow(new JsonProcessingException("bad payload") {});
         when(listOps.rightPush(eq(DLQ_KEY), any()))
                 .thenThrow(new DataAccessResourceFailureException("Redis DLQ down"));
-        when(objectMapper.convertValue(rawJob, java.util.Map.class)).thenReturn(java.util.Map.of());
+        when(objectMapper.convertValue(any(), eq(java.util.Map.class))).thenReturn(Map.of());
 
-        worker.processQueue();
+        worker.onMessage(record(Map.of("payload", "bad")));
 
-        // Falls back to MongoDB failed_notifications
         verify(failedNotificationRepository).save(any(FailedNotification.class));
     }
 
     @Test
     void dlqPushFailsAndMongoFallbackFails_doesNotPropagate() throws Exception {
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class))
-                .thenThrow(new IllegalArgumentException("bad"));
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class)))
+                .thenThrow(new JsonProcessingException("bad") {});
         when(listOps.rightPush(eq(DLQ_KEY), any()))
                 .thenThrow(new DataAccessResourceFailureException("DLQ Redis down"));
-        when(objectMapper.convertValue(rawJob, java.util.Map.class)).thenReturn(java.util.Map.of());
+        when(objectMapper.convertValue(any(), eq(java.util.Map.class))).thenReturn(Map.of());
         when(failedNotificationRepository.save(any()))
                 .thenThrow(new RuntimeException("Mongo also down"));
 
-        // Both fallbacks fail — must not propagate; job is permanently lost (logged)
-        assertThatNoException().isThrownBy(() -> worker.processQueue());
+        assertThatNoException().isThrownBy(() -> worker.onMessage(record(Map.of("payload", "bad"))));
     }
 
-    // ===================================================================
+    // ---------------------------------------------------------------
     // Non-IN_APP channels (placeholders, no crash)
-    // ===================================================================
+    // ---------------------------------------------------------------
 
     @Test
     void emailChannel_doesNotThrow() throws Exception {
@@ -573,12 +538,11 @@ class NotificationWorkerTest {
                 .recipientIds(List.of("user1")).organizationId("org1")
                 .tier("HIGH").type("ALERT").title("T").description("D")
                 .redirectUri("https://x.com").channels(List.of("EMAIL")).build();
-
-        when(listOps.leftPop(QUEUE_KEY)).thenReturn(rawJob);
-        when(objectMapper.convertValue(rawJob, NotificationPayload.class)).thenReturn(emailPayload);
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(emailPayload);
         when(notificationRepository.save(any())).thenReturn(savedNotification);
 
-        assertThatNoException().isThrownBy(() -> worker.processQueue());
+        assertThatNoException().isThrownBy(() -> worker.onMessage(record(Map.of("payload", "{}"))));
         verify(sseService, never()).pushNotification(any(), any());
+        verifyXAckIssued();
     }
 }
