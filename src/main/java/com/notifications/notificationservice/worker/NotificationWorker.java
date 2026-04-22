@@ -12,16 +12,18 @@ import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.stream.StreamListener;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -36,10 +38,8 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
-public class NotificationWorker {
+public class NotificationWorker implements StreamListener<String, MapRecord<String, String, String>> {
 
-    private static final String QUEUE_KEY   = "notifications_queue";
     private static final String DLQ_KEY     = "notifications_dlq";
     private static final int    MAX_RETRIES = 3;
 
@@ -50,71 +50,101 @@ public class NotificationWorker {
     private final SseService                     sseService;
     private final NotificationService            notificationService;
     private final ObjectMapper                   objectMapper;
-    private final Validator                      validator;      // FIX 2: Bean Validation
-    private final MongoTemplate                  mongoTemplate;  // FIX 6: atomic $inc
+    private final Validator                      validator;
+    private final MongoTemplate                  mongoTemplate;
+    private final StringRedisTemplate            stringRedisTemplate;
+    private final String                         consumerGroup;
 
-    // Poll queue every second
-    @Scheduled(fixedDelay = 1000)
-    public void processQueue() {
-        Object job;
-        try {
-            job = redisTemplate.opsForList().leftPop(QUEUE_KEY);
-        } catch (Exception e) {
-            log.warn("Redis unavailable — could not poll queue. Will retry next tick.", e);
+    public NotificationWorker(
+            RedisTemplate<String, Object> redisTemplate,
+            NotificationRepository notificationRepository,
+            FailedNotificationRepository failedNotificationRepository,
+            CacheService cacheService,
+            SseService sseService,
+            NotificationService notificationService,
+            ObjectMapper objectMapper,
+            Validator validator,
+            MongoTemplate mongoTemplate,
+            StringRedisTemplate stringRedisTemplate,
+            @Value("${redis.stream.consumer-group}") String consumerGroup) {
+        this.redisTemplate                = redisTemplate;
+        this.notificationRepository       = notificationRepository;
+        this.failedNotificationRepository = failedNotificationRepository;
+        this.cacheService                 = cacheService;
+        this.sseService                   = sseService;
+        this.notificationService          = notificationService;
+        this.objectMapper                 = objectMapper;
+        this.validator                    = validator;
+        this.mongoTemplate                = mongoTemplate;
+        this.stringRedisTemplate          = stringRedisTemplate;
+        this.consumerGroup                = consumerGroup;
+    }
+
+    @Override
+    public void onMessage(MapRecord<String, String, String> record) {
+        String streamKey = record.getStream();
+        log.info("Processing message {} from stream {}", record.getId(), streamKey);
+
+        String payloadJson = record.getValue().get("payload");
+        if (payloadJson == null) {
+            log.error("Record {} on stream {} missing 'payload' field — sending to DLQ.", record.getId(), streamKey);
+            pushToDlq(record.getValue(), "Missing payload field");
+            ack(record);
             return;
         }
 
-        if (job == null) return;
-
-        log.info("Processing notification job from queue");
-
-        // Deserialize once before entering the retry loop.
-        // A malformed payload cannot be fixed by retrying — send straight to DLQ.
         NotificationPayload payload;
         try {
-            payload = objectMapper.convertValue(job, NotificationPayload.class);
+            payload = objectMapper.readValue(payloadJson, NotificationPayload.class);
         } catch (Exception e) {
-            log.error("Malformed queue job — cannot deserialize payload. Sending to DLQ.", e);
-            pushToDlq(job, e.getMessage(), null);
+            log.error("Cannot deserialize record {} on stream {} — sending to DLQ.", record.getId(), streamKey, e);
+            pushToDlq(record.getValue(), e.getMessage());
+            ack(record);
             return;
         }
 
-        // FIX 2: Use Bean Validation instead of manual checks.
-        // objectMapper.convertValue() does NOT trigger @NotBlank/@NotEmpty annotations,
-        // so we run the validator programmatically here.
         Set<ConstraintViolation<NotificationPayload>> violations = validator.validate(payload);
         if (!violations.isEmpty()) {
             String errors = violations.stream()
                     .map(ConstraintViolation::getMessage)
                     .collect(Collectors.joining(", "));
-            log.error("Invalid payload — {}. Sending to DLQ.", errors);
-            pushToDlq(job, errors, null);
+            log.error("Invalid payload in record {} — {}. Sending to DLQ.", record.getId(), errors);
+            pushToDlq(record.getValue(), errors);
+            ack(record);
             return;
         }
 
-        // FIX 7: Deduplicate channels preserving insertion order.
-        // Prevents the same channel being processed twice if the producer sends duplicates.
+        // Deduplicate channels preserving insertion order
         payload.setChannels(new ArrayList<>(new LinkedHashSet<>(payload.getChannels())));
 
-        // broadcastId is fixed for this job. Generating it inside the retry loop
-        // would assign different IDs to duplicated notifications on each retry attempt.
+        // broadcastId is fixed for this job so all recipients share the same ID across retries
         String broadcastId = UUID.randomUUID().toString();
 
-        processWithRetry(job, payload, broadcastId);
+        boolean success = processWithRetry(payload, broadcastId);
+        if (success) {
+            ack(record);
+        }
+        // On transient failure: no XACK — message stays pending for PendingSweeper to retry
     }
 
-    // FIX 1: Track per-recipient success so that retries only re-process failed recipients.
-    // DuplicateKeyException from the unique {broadcast_id, recipient_id} index means the
-    // notification was already saved (idempotent) — treat as success, do not retry.
-    private void processWithRetry(Object rawJob,
-                                  NotificationPayload payload,
-                                  String broadcastId) {
+    private void ack(MapRecord<String, String, String> record) {
+        try {
+            stringRedisTemplate.opsForStream()
+                    .acknowledge(record.getStream(), consumerGroup, record.getId());
+        } catch (Exception e) {
+            log.warn("XACK failed for record {} on stream {} — it may be re-delivered",
+                    record.getId(), record.getStream(), e);
+        }
+    }
+
+    // Returns true when all recipients succeeded; false when max retries are exhausted.
+    // Caller must NOT XACK on false so PendingSweeper can retry via XCLAIM.
+    private boolean processWithRetry(NotificationPayload payload, String broadcastId) {
         Set<String> succeeded = new HashSet<>();
-        int attempt = 0;
+        int         attempt   = 0;
 
         while (attempt <= MAX_RETRIES) {
             boolean anyFailed = false;
-            Exception lastException = null;
 
             for (String recipientId : payload.getRecipientIds()) {
                 if (succeeded.contains(recipientId)) continue;
@@ -123,14 +153,13 @@ public class NotificationWorker {
                     processForRecipient(payload, recipientId, broadcastId);
                     succeeded.add(recipientId);
                 } catch (DuplicateKeyException e) {
-                    // Already saved on a previous retry — idempotent, treat as success
+                    // Already saved on a previous attempt — idempotent, treat as success
                     log.warn("Duplicate key for broadcastId {} recipient {} — already saved, skipping",
                             broadcastId, recipientId);
                     succeeded.add(recipientId);
                 } catch (Exception e) {
                     anyFailed = true;
-                    lastException = e;
-                    log.error("Failed to process broadcastId {} for recipient {}. Attempt {}/{}",
+                    log.error("Failed broadcastId {} recipient {}. Attempt {}/{}",
                             broadcastId, recipientId, attempt, MAX_RETRIES, e);
                 }
             }
@@ -138,27 +167,25 @@ public class NotificationWorker {
             if (!anyFailed) {
                 log.info("Successfully processed broadcastId {} for {} recipient(s)",
                         broadcastId, payload.getRecipientIds().size());
-                return;
+                return true;
             }
 
             if (attempt < MAX_RETRIES) {
-                // Exponential back-off: 1 s → 2 s → 4 s
-                long delayMs = (long) Math.pow(2, attempt) * 1000;
+                long delayMs = (long) Math.pow(2, attempt) * 1000; // 1 s → 2 s → 4 s
                 try {
                     Thread.sleep(delayMs);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    return;
+                    return false;
                 }
                 attempt++;
             } else {
-                log.error("Max retries reached for broadcastId {}. Moving to DLQ", broadcastId);
-                // FIX 3: pass the actual exception message and channels context
-                String reason = lastException != null ? lastException.getMessage() : "Max retries exceeded";
-                pushToDlq(rawJob, reason, String.join(",", payload.getChannels()));
-                return;
+                log.error("Max retries reached for broadcastId {}. Message will remain pending for PendingSweeper.",
+                        broadcastId);
+                return false;
             }
         }
+        return false;
     }
 
     private void processForRecipient(NotificationPayload payload,
@@ -179,70 +206,51 @@ public class NotificationWorker {
                 .createdAt(Instant.now())
                 .build();
 
-        // MongoDB save is the critical operation — exceptions here propagate to the
-        // retry loop so the job is retried or moved to DLQ.
+        // MongoDB save is the critical operation — exceptions propagate to the retry loop
         notification = notificationRepository.save(notification);
 
         List<String> channels = payload.getChannels();
 
-        // Cache refresh is best-effort. Wrapping in try-catch ensures a Redis
-        // failure does NOT propagate to the retry loop — which would cause the
-        // MongoDB save above (already persisted) to be executed again on retry,
-        // creating duplicate notifications for the same recipient.
+        // Cache refresh is best-effort. A Redis failure must NOT reach the retry loop —
+        // doing so would re-execute the MongoDB save above and create duplicate notifications.
         try {
             cacheService.invalidateUserCache(recipientId);
 
-            // Atomically increment the unread counter document via $inc.
-            // Invalidate the cached count — do NOT write the new value back to Redis.
-            // A post-increment write would be non-atomic from Redis's perspective:
-            // another concurrent $inc could land between our DB write and our cache
-            // write, leaving Redis with a stale value. Deletion is always safe;
-            // the next getUnreadCount() will miss the cache and fetch fresh from MongoDB.
+            // Atomic $inc on unread counter; invalidate cache rather than writing back —
+            // a concurrent $inc could race our cache write and leave a stale value.
             mongoTemplate.findAndModify(
                     new Query(Criteria.where("_id").is(recipientId)),
                     new Update().inc("count", 1),
                     FindAndModifyOptions.options().returnNew(true).upsert(true),
                     UserNotificationCount.class);
 
-            // IN_APP — push via SSE if user is connected.
-            // Use the $inc result for the SSE event; it is best-effort and the
-            // client will re-fetch on the next getNotifications() call anyway.
             if (channels != null && channels.contains("IN_APP")) {
                 sseService.pushNotification(
                         recipientId, notificationService.mapToResponse(notification));
-                // Fetch the fresh count from MongoDB (cache-aside) for the SSE push
                 long unreadCount = notificationService.getUnreadCount(recipientId);
                 sseService.pushUnreadCount(recipientId, unreadCount);
             }
         } catch (Exception e) {
-            log.warn("Cache/SSE refresh failed for user {} after notification save — " +
-                     "cache may be stale until TTL, SSE not pushed", recipientId, e);
+            log.warn("Cache/SSE refresh failed for user {} after save — cache may be stale until TTL",
+                    recipientId, e);
         }
 
-        // EMAIL — placeholder (implement with SendGrid)
         if (channels != null && channels.contains("EMAIL")) {
             log.info("EMAIL channel — to be implemented with SendGrid");
         }
-
-        // SMS — placeholder (implement with Twilio)
         if (channels != null && channels.contains("SMS")) {
             log.info("SMS channel — to be implemented with Twilio");
         }
-
-        // PUSH — placeholder (implement with FCM)
         if (channels != null && channels.contains("PUSH")) {
             log.info("PUSH channel — to be implemented with FCM");
         }
     }
 
     /**
-     * Push a failed job to the Redis DLQ.
-     * If Redis is also unavailable, falls back to persisting directly to MongoDB.
-     *
-     * @param channel null when the failure is not channel-specific (deserialization/validation);
-     *                comma-separated channel list when max retries are exhausted.
+     * Push an unprocessable job to the Redis DLQ.
+     * Falls back to MongoDB when Redis is also unavailable.
      */
-    private void pushToDlq(Object rawJob, String reason, String channel) {
+    private void pushToDlq(Object rawJob, String reason) {
         try {
             redisTemplate.opsForList().rightPush(DLQ_KEY, rawJob);
         } catch (Exception redisEx) {
@@ -252,38 +260,15 @@ public class NotificationWorker {
                 Map<String, Object> rawPayload = objectMapper.convertValue(rawJob, Map.class);
                 FailedNotification failed = FailedNotification.builder()
                         .originalPayload(rawPayload)
-                        .failedChannel(channel)
                         .failureReason(reason)
                         .failedAt(Instant.now())
                         .build();
                 failedNotificationRepository.save(failed);
                 log.warn("Job saved to MongoDB failed_notifications as DLQ fallback. Reason: {}", reason);
             } catch (Exception mongoEx) {
-                log.error("MongoDB DLQ fallback also failed — job permanently lost. Reason: {}. Raw job: {}",
+                log.error("MongoDB DLQ fallback also failed — job permanently lost. Reason: {}. Raw: {}",
                         reason, rawJob, mongoEx);
             }
-        }
-    }
-
-    // Called by channel implementations when a specific delivery channel fails
-    void saveFailedChannel(NotificationPayload payload, String channel, String reason) {
-        try {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> originalPayload =
-                    objectMapper.convertValue(payload, Map.class);
-
-            FailedNotification failed = FailedNotification.builder()
-                    .originalPayload(originalPayload)
-                    .failedChannel(channel)
-                    .failureReason(reason)
-                    .failedAt(Instant.now())
-                    .build();
-
-            failedNotificationRepository.save(failed);
-            log.warn("Saved failed channel {} to failed_notifications. Reason: {}",
-                    channel, reason);
-        } catch (Exception e) {
-            log.error("Could not persist failed notification to MongoDB", e);
         }
     }
 }
