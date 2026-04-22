@@ -8,6 +8,8 @@ services:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    networks:
+      - notification
 
   redis:
     image: redis:7-alpine
@@ -17,6 +19,12 @@ services:
     # allkeys-lru evicts the least-recently-used key when maxmemory is reached,
     # preventing OOM errors that would block all writes and cause 500s.
     command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - notification
 
 volumes:
   mongodb_data:
+
+networks:
+  notification:
+    external: true

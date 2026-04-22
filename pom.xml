@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.5</version>
+        <version>3.5.13</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.notifications</groupId>
@@ -28,7 +28,35 @@
     </scm>
     <properties>
         <java.version>21</java.version>
+        <tomcat.version>10.1.54</tomcat.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Force Netty 4.2.12.Final across all transitive deps (Lettuce, MongoDB driver).
+                 Netty 4.1.114.Final carries multiple High CVEs flagged by OWASP. -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>4.2.12.Final</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Force commons-lang3 3.20.0 — overrides 3.14.0 pulled in transitively. -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.20.0</version>
+            </dependency>
+            <!-- Force log4j-api 2.25.4 — overrides 2.23.1 pulled in transitively. -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>2.25.4</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -57,7 +85,7 @@
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-            <version>2.3.0</version>
+            <version>2.8.17</version>
         </dependency>
 
         <dependency>
@@ -74,6 +102,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.projectreactor.tools</groupId>
+            <artifactId>blockhound</artifactId>
+            <version>1.0.8.RELEASE</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -127,6 +161,17 @@
                         </configuration>
                     </execution>
                 </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- ${argLine} is populated by JaCoCo's prepare-agent goal.
+                         EnableDynamicAgentLoading  — suppresses Java 21 dynamic-agent warning.
+                         AllowRedefinitionToAddDeleteMethods — required by BlockHound on JDK 13+
+                         to redefine Thread.sleep() and Unsafe.park() for instrumentation. -->
+                    <argLine>${argLine} -XX:+EnableDynamicAgentLoading -XX:+AllowRedefinitionToAddDeleteMethods</argLine>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
