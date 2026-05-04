@@ -22,9 +22,17 @@ import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
+import com.notifications.notificationservice.dto.GroupedNotificationResponse;
+
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -40,10 +48,10 @@ public class NotificationService {
     // Get paginated notifications for a user (Cache-Aside)
     public PageResponse<NotificationResponse> getNotifications(
             String userId,
-            String organizationId,
+            List<String> orgIds,
             String state,
             String tier,
-            String type,
+            List<String> types,
             int page,
             int limit) {
 
@@ -52,7 +60,7 @@ public class NotificationService {
         }
 
         String cacheKey = cacheService.buildNotificationCacheKey(
-                userId, organizationId, state, tier, type, page, limit);
+                userId, orgIds, state, tier, types, page, limit);
 
         // 1. Check cache first
         PageResponse<NotificationResponse> cached =
@@ -72,13 +80,13 @@ public class NotificationService {
                         Sort.Order.asc("_id")));
 
         Page<Notification> dbPage = queryWithFilters(
-                userId, organizationId, state, tier, type, pageable);
+                userId, orgIds, state, tier, types, pageable);
 
         // 3. FIX 10: If the live collection returns an empty page for page > 1,
         //    fall back to the archive collection so paginated reads span both stores.
         if (dbPage.getContent().isEmpty() && page > 1) {
             Page<Notification> archivePage = queryArchiveWithFilters(
-                    userId, organizationId, state, tier, type, pageable);
+                    userId, orgIds, state, tier, types, pageable);
 
             if (archivePage.hasContent()) {
                 long unreadCount = getUnreadCount(userId);
@@ -192,8 +200,16 @@ public class NotificationService {
                 .build();
     }
 
-    // Map Notification entity to NotificationResponse DTO
+    // Map Notification entity to NotificationResponse DTO.
+    // For COMMENT notifications with no taskTitle in the DB (e.g. older records),
+    // fall back to "Untitled task" and log a content-quality warning.
     public NotificationResponse mapToResponse(Notification notification) {
+        String taskTitle = notification.getTaskTitle();
+        if (taskTitle == null && "COMMENT".equals(notification.getType())) {
+            log.warn("low_quality_notification: COMMENT notification {} has no taskTitle — using fallback",
+                    notification.getId());
+            taskTitle = "Untitled task";
+        }
         return NotificationResponse.builder()
                 .id(notification.getId())
                 .broadcastId(notification.getBroadcastId())
@@ -203,6 +219,7 @@ public class NotificationService {
                 .type(notification.getType())
                 .title(notification.getTitle())
                 .description(notification.getDescription())
+                .taskTitle(taskTitle)
                 .redirectUri(notification.getRedirectUri())
                 .imageUrl(notification.getImageUrl())
                 .metadata(notification.getMetadata())
@@ -215,10 +232,10 @@ public class NotificationService {
 
     // Build a dynamic MongoDB query combining all provided filters via andOperator.
     private Page<Notification> queryWithFilters(
-            String userId, String organizationId, String state,
-            String tier, String type, Pageable pageable) {
+            String userId, List<String> orgIds, String state,
+            String tier, List<String> types, Pageable pageable) {
 
-        List<Criteria> filters = buildFilters(userId, organizationId, state, tier, type);
+        List<Criteria> filters = buildFilters(userId, orgIds, state, tier, types);
         Criteria combined = new Criteria().andOperator(filters);
 
         long total = mongoTemplate.count(new Query(combined), Notification.class);
@@ -230,10 +247,10 @@ public class NotificationService {
 
     // FIX 10: Query the archive collection as a fallback when live collection is empty on page > 1.
     private Page<Notification> queryArchiveWithFilters(
-            String userId, String organizationId, String state,
-            String tier, String type, Pageable pageable) {
+            String userId, List<String> orgIds, String state,
+            String tier, List<String> types, Pageable pageable) {
 
-        List<Criteria> filters = buildFilters(userId, organizationId, state, tier, type);
+        List<Criteria> filters = buildFilters(userId, orgIds, state, tier, types);
         Criteria combined = new Criteria().andOperator(filters);
 
         long total = mongoTemplate.count(
@@ -244,15 +261,80 @@ public class NotificationService {
         return new PageImpl<>(content, pageable, total);
     }
 
-    private List<Criteria> buildFilters(String userId, String organizationId,
-                                        String state, String tier, String type) {
+    private List<Criteria> buildFilters(String userId, List<String> orgIds,
+                                        String state, String tier, List<String> types) {
         List<Criteria> filters = new ArrayList<>();
         filters.add(Criteria.where("recipient_id").is(userId));
-        if (organizationId != null) filters.add(Criteria.where("organization_id").is(organizationId));
-        if (state         != null) filters.add(Criteria.where("state").is(state));
-        if (tier          != null) filters.add(Criteria.where("tier").is(tier));
-        if (type          != null) filters.add(Criteria.where("type").is(type));
+        if (orgIds != null && !orgIds.isEmpty()) filters.add(Criteria.where("organization_id").in(orgIds));
+        if (state  != null)                      filters.add(Criteria.where("state").is(state));
+        if (tier   != null)                      filters.add(Criteria.where("tier").is(tier));
+        if (types  != null && !types.isEmpty())  filters.add(Criteria.where("type").in(types));
         return filters;
+    }
+
+    // Get grouped-by-date notifications for a user (no cache — direct MongoDB query per MVP spec).
+    public GroupedNotificationResponse getGroupedNotifications(
+            String userId,
+            List<String> orgIds,
+            String state,
+            String tier,
+            List<String> types,
+            int page,
+            int limit) {
+
+        if (page < 1) {
+            throw new IllegalArgumentException("page must be >= 1");
+        }
+
+        Pageable pageable = PageRequest.of(
+                page - 1, limit,
+                Sort.by(Sort.Order.desc("created_at"), Sort.Order.asc("_id")));
+
+        Page<Notification> dbPage = queryWithFilters(userId, orgIds, state, tier, types, pageable);
+
+        markUnseenAsSeen(userId, dbPage.getContent());
+
+        long unreadCount = getUnreadCount(userId);
+        sseService.pushUnreadCount(userId, unreadCount);
+
+        List<NotificationResponse> items = dbPage.getContent().stream()
+                .map(this::mapToResponse)
+                .toList();
+
+        return groupByDate(items);
+    }
+
+    // Group a sorted (createdAt DESC) list of notifications into date sections.
+    // Date labels are in UTC. TODO: support per-user timezone when auth/profile service provides it.
+    private GroupedNotificationResponse groupByDate(List<NotificationResponse> notifications) {
+        ZoneId utc = ZoneId.of("UTC");
+        LocalDate today     = LocalDate.now(utc);
+        LocalDate yesterday = today.minusDays(1);
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE, d MMM", Locale.ENGLISH);
+
+        // LinkedHashMap preserves insertion order so sections stay newest-first.
+        Map<String, List<NotificationResponse>> grouped = new LinkedHashMap<>();
+        for (NotificationResponse n : notifications) {
+            LocalDate date  = n.getCreatedAt().atZone(utc).toLocalDate();
+            String label;
+            if (date.equals(today)) {
+                label = "Today";
+            } else if (date.equals(yesterday)) {
+                label = "Yesterday";
+            } else {
+                label = date.format(formatter);
+            }
+            grouped.computeIfAbsent(label, k -> new ArrayList<>()).add(n);
+        }
+
+        List<GroupedNotificationResponse.Section> sections = grouped.entrySet().stream()
+                .map(e -> GroupedNotificationResponse.Section.builder()
+                        .dateLabel(e.getKey())
+                        .items(e.getValue())
+                        .build())
+                .toList();
+
+        return GroupedNotificationResponse.builder().sections(sections).build();
     }
 
     // Mark all UNSEEN notifications in the given list as SEEN.

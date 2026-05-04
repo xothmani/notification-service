@@ -22,6 +22,8 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
 
+import com.notifications.notificationservice.dto.GroupedNotificationResponse;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -137,7 +139,8 @@ class NotificationServiceTest {
             when(userNotificationCountRepository.findById(anyString())).thenReturn(Optional.empty());
 
             PageResponse<NotificationResponse> result =
-                    notificationService.getNotifications("user1", "org1", "UNSEEN", "HIGH", "ALERT", 1, 10);
+                    notificationService.getNotifications(
+                            "user1", List.of("org1"), "UNSEEN", "HIGH", List.of("ALERT"), 1, 10);
 
             assertThat(result).isNotNull();
         }
@@ -232,6 +235,95 @@ class NotificationServiceTest {
             // No archive queries with 3-arg signatures
             verify(mongoTemplate, never()).count(any(Query.class), any(Class.class), anyString());
             assertThat(result.getSource()).isNull();
+        }
+
+        @Test
+        void multipleOrgIds_acceptedWithoutError() {
+            when(cacheService.buildNotificationCacheKey(anyString(), any(), any(), any(), any(), eq(1), eq(10)))
+                    .thenReturn("key");
+            when(cacheService.getNotifications("key")).thenReturn(null);
+            when(mongoTemplate.count(any(Query.class), any(Class.class))).thenReturn(0L);
+            doReturn(List.of()).when(mongoTemplate).find(any(Query.class), any(Class.class));
+            when(userNotificationCountRepository.findById(anyString())).thenReturn(Optional.empty());
+
+            PageResponse<NotificationResponse> result =
+                    notificationService.getNotifications(
+                            "user1", List.of("org1", "org2"), null, null, null, 1, 10);
+
+            assertThat(result).isNotNull();
+        }
+
+        @Test
+        void multipleTypes_acceptedWithoutError() {
+            when(cacheService.buildNotificationCacheKey(anyString(), any(), any(), any(), any(), eq(1), eq(10)))
+                    .thenReturn("key");
+            when(cacheService.getNotifications("key")).thenReturn(null);
+            when(mongoTemplate.count(any(Query.class), any(Class.class))).thenReturn(0L);
+            doReturn(List.of()).when(mongoTemplate).find(any(Query.class), any(Class.class));
+            when(userNotificationCountRepository.findById(anyString())).thenReturn(Optional.empty());
+
+            PageResponse<NotificationResponse> result =
+                    notificationService.getNotifications(
+                            "user1", null, null, null, List.of("ALERT", "COMMENT"), 1, 10);
+
+            assertThat(result).isNotNull();
+        }
+    }
+
+    // ===================================================================
+    // getGroupedNotifications
+    // ===================================================================
+
+    @Nested
+    class GetGroupedNotifications {
+
+        @Test
+        void happyPath_returnsGroupedResponse() {
+            Instant now = Instant.now();
+            Notification n = Notification.builder()
+                    .id("n1").recipientId("user1").state("SEEN").createdAt(now).build();
+            when(mongoTemplate.count(any(Query.class), any(Class.class))).thenReturn(1L);
+            doReturn(List.of(n)).when(mongoTemplate).find(any(Query.class), any(Class.class));
+            when(userNotificationCountRepository.findById("user1")).thenReturn(Optional.empty());
+
+            GroupedNotificationResponse result =
+                    notificationService.getGroupedNotifications("user1", null, null, null, null, 1, 10);
+
+            assertThat(result).isNotNull();
+            assertThat(result.getSections()).isNotEmpty();
+            assertThat(result.getSections().get(0).getDateLabel()).isEqualTo("Today");
+            assertThat(result.getSections().get(0).getItems()).hasSize(1);
+        }
+
+        @Test
+        void emptyResults_returnsEmptySections() {
+            when(mongoTemplate.count(any(Query.class), any(Class.class))).thenReturn(0L);
+            doReturn(List.of()).when(mongoTemplate).find(any(Query.class), any(Class.class));
+            when(userNotificationCountRepository.findById("user1")).thenReturn(Optional.empty());
+
+            GroupedNotificationResponse result =
+                    notificationService.getGroupedNotifications("user1", null, null, null, null, 1, 10);
+
+            assertThat(result.getSections()).isEmpty();
+        }
+
+        @Test
+        void invalidPage_throwsIllegalArgument() {
+            assertThatThrownBy(() ->
+                    notificationService.getGroupedNotifications("user1", null, null, null, null, 0, 10))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        @Test
+        void doesNotHitCache() {
+            when(mongoTemplate.count(any(Query.class), any(Class.class))).thenReturn(0L);
+            doReturn(List.of()).when(mongoTemplate).find(any(Query.class), any(Class.class));
+            when(userNotificationCountRepository.findById("user1")).thenReturn(Optional.empty());
+
+            notificationService.getGroupedNotifications("user1", null, null, null, null, 1, 10);
+
+            verify(cacheService, never()).getNotifications(anyString());
+            verify(cacheService, never()).saveNotifications(anyString(), any());
         }
     }
 
@@ -432,5 +524,38 @@ class NotificationServiceTest {
         assertThat(r.getType()).isEqualTo("ALERT");
         assertThat(r.getState()).isEqualTo("SEEN");
         assertThat(r.getCreatedAt()).isEqualTo(now);
+    }
+
+    @Test
+    void mapToResponse_taskTitleMappedWhenPresent() {
+        Notification n = Notification.builder()
+                .id("n1").recipientId("u1").type("COMMENT").taskTitle("My Task")
+                .state("UNSEEN").createdAt(Instant.now()).build();
+
+        NotificationResponse r = notificationService.mapToResponse(n);
+
+        assertThat(r.getTaskTitle()).isEqualTo("My Task");
+    }
+
+    @Test
+    void mapToResponse_commentWithNullTaskTitle_fallsBackToUntitled() {
+        Notification n = Notification.builder()
+                .id("n1").recipientId("u1").type("COMMENT").taskTitle(null)
+                .state("UNSEEN").createdAt(Instant.now()).build();
+
+        NotificationResponse r = notificationService.mapToResponse(n);
+
+        assertThat(r.getTaskTitle()).isEqualTo("Untitled task");
+    }
+
+    @Test
+    void mapToResponse_nonCommentWithNullTaskTitle_remainsNull() {
+        Notification n = Notification.builder()
+                .id("n1").recipientId("u1").type("ALERT").taskTitle(null)
+                .state("UNSEEN").createdAt(Instant.now()).build();
+
+        NotificationResponse r = notificationService.mapToResponse(n);
+
+        assertThat(r.getTaskTitle()).isNull();
     }
 }

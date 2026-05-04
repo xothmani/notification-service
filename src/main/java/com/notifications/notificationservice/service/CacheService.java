@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -64,20 +65,26 @@ public class CacheService {
 
     /**
      * Build a deterministic cache key that encodes all query parameters.
+     * List params are sorted before joining so [A,B] and [B,A] produce the same key.
      * Callers must use this method — never construct the key manually.
      */
-    public String buildNotificationCacheKey(String userId, String organizationId,
-                                            String state, String tier, String type,
+    public String buildNotificationCacheKey(String userId, List<String> orgIds,
+                                            String state, String tier, List<String> types,
                                             int page, int limit) {
         RedisKeyValidator.validate(userId);
-        String orgPart = organizationId != null ? ":" + organizationId : "";
+        String orgPart = (orgIds != null && !orgIds.isEmpty())
+                ? ":" + orgIds.stream().sorted().collect(Collectors.joining(","))
+                : "";
+        String typePart = (types != null && !types.isEmpty())
+                ? types.stream().sorted().collect(Collectors.joining(","))
+                : "";
         return String.format("%s%s%s:%s:%s:%s:%d:%d",
                 NOTIFICATIONS_KEY,
                 userId,
                 orgPart,
-                state != null ? state : "",
-                tier  != null ? tier  : "",
-                type  != null ? type  : "",
+                state   != null ? state : "",
+                tier    != null ? tier  : "",
+                typePart,
                 page, limit);
     }
 

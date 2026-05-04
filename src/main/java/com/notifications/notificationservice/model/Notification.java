@@ -41,6 +41,9 @@ public class Notification {
     private String title;
     private String description;
 
+    @Field("task_title")
+    private String taskTitle;
+
     @Field("redirect_uri")
     private String redirectUri;
 

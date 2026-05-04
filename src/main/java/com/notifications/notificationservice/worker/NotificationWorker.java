@@ -114,6 +114,15 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
             return;
         }
 
+        // Content quality: taskTitle is required for COMMENT notifications.
+        if ("COMMENT".equals(payload.getType()) &&
+                (payload.getTaskTitle() == null || payload.getTaskTitle().isBlank())) {
+            log.error("COMMENT notification in record {} is missing taskTitle — sending to DLQ.", record.getId());
+            pushToDlq(record.getValue(), "taskTitle is required for type=COMMENT");
+            ack(record);
+            return;
+        }
+
         // Deduplicate channels preserving insertion order
         payload.setChannels(new ArrayList<>(new LinkedHashSet<>(payload.getChannels())));
 
@@ -199,6 +208,7 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
                 .type(payload.getType())
                 .title(payload.getTitle())
                 .description(payload.getDescription())
+                .taskTitle(payload.getTaskTitle())
                 .redirectUri(payload.getRedirectUri())
                 .imageUrl(payload.getImageUrl())
                 .metadata(payload.getMetadata())

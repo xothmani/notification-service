@@ -529,6 +529,79 @@ class NotificationWorkerTest {
     }
 
     // ---------------------------------------------------------------
+    // Content quality: taskTitle required for COMMENT type
+    // ---------------------------------------------------------------
+
+    @Test
+    void commentTypeWithTaskTitle_savedSuccessfully() throws Exception {
+        NotificationPayload commentWithTitle = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("COMMENT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("IN_APP"))
+                .taskTitle("My Task").build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(commentWithTitle);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(notificationRepository, times(1)).save(any());
+        verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void commentTypeWithNullTaskTitle_goesToDlqAndXAcks() throws Exception {
+        NotificationPayload commentNoTitle = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("COMMENT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("IN_APP"))
+                .taskTitle(null).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(commentNoTitle);
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(notificationRepository, never()).save(any());
+        verify(listOps).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void commentTypeWithBlankTaskTitle_goesToDlqAndXAcks() throws Exception {
+        NotificationPayload commentBlankTitle = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("COMMENT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("IN_APP"))
+                .taskTitle("   ").build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(commentBlankTitle);
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(notificationRepository, never()).save(any());
+        verify(listOps).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void nonCommentTypeWithNullTaskTitle_savedSuccessfully() throws Exception {
+        // taskTitle is only required for COMMENT — other types should save fine without it
+        NotificationPayload alertNoTitle = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("IN_APP"))
+                .taskTitle(null).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(alertNoTitle);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(notificationService.mapToResponse(any())).thenReturn(new NotificationResponse());
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(notificationRepository, times(1)).save(any());
+        verify(listOps, never()).rightPush(eq(DLQ_KEY), any());
+        verifyXAckIssued();
+    }
+
+    // ---------------------------------------------------------------
     // Non-IN_APP channels (placeholders, no crash)
     // ---------------------------------------------------------------
 

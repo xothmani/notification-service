@@ -17,6 +17,8 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.ValueOperations;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -160,9 +162,9 @@ class CacheServiceTest {
         }
 
         @Test
-        void allPresent_returnsFullKey() {
+        void allPresent_singleValues_returnsFullKey() {
             String key = cacheService.buildNotificationCacheKey(
-                    "u1", "org1", "UNSEEN", "HIGH", "ALERT", 1, 10);
+                    "u1", List.of("org1"), "UNSEEN", "HIGH", List.of("ALERT"), 1, 10);
             assertThat(key).isEqualTo("notifications:u1:org1:UNSEEN:HIGH:ALERT:1:10");
         }
 
@@ -174,9 +176,36 @@ class CacheServiceTest {
         }
 
         @Test
+        void emptyLists_treatAsMissing() {
+            String key = cacheService.buildNotificationCacheKey(
+                    "u1", List.of(), null, null, List.of(), 1, 10);
+            assertThat(key).isEqualTo("notifications:u1::::1:10");
+        }
+
+        @Test
+        void multipleOrgIds_sortedBeforeJoining() {
+            String key1 = cacheService.buildNotificationCacheKey(
+                    "u1", List.of("orgB", "orgA"), null, null, null, 1, 10);
+            String key2 = cacheService.buildNotificationCacheKey(
+                    "u1", List.of("orgA", "orgB"), null, null, null, 1, 10);
+            assertThat(key1).isEqualTo(key2);
+            assertThat(key1).isEqualTo("notifications:u1:orgA,orgB::::1:10");
+        }
+
+        @Test
+        void multipleTypes_sortedBeforeJoining() {
+            String key1 = cacheService.buildNotificationCacheKey(
+                    "u1", null, null, null, List.of("COMMENT", "ALERT"), 1, 10);
+            String key2 = cacheService.buildNotificationCacheKey(
+                    "u1", null, null, null, List.of("ALERT", "COMMENT"), 1, 10);
+            assertThat(key1).isEqualTo(key2);
+            assertThat(key1).isEqualTo("notifications:u1:::ALERT,COMMENT:1:10");
+        }
+
+        @Test
         void deterministicForSameInputs() {
-            String k1 = cacheService.buildNotificationCacheKey("u1", "org", null, "T", null, 1, 5);
-            String k2 = cacheService.buildNotificationCacheKey("u1", "org", null, "T", null, 1, 5);
+            String k1 = cacheService.buildNotificationCacheKey("u1", List.of("org"), null, "T", null, 1, 5);
+            String k2 = cacheService.buildNotificationCacheKey("u1", List.of("org"), null, "T", null, 1, 5);
             assertThat(k1).isEqualTo(k2);
         }
     }

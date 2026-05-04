@@ -25,6 +25,7 @@ public class NotificationResponse {
     private String type;
     private String title;
     private String description;
+    private String taskTitle;
     private String redirectUri;
     private String imageUrl;
     private Map<String, Object> metadata;

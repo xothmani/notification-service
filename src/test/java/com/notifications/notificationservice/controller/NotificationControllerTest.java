@@ -20,6 +20,10 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
 
+import com.notifications.notificationservice.dto.GroupedNotificationResponse;
+
+import java.time.Instant;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -102,11 +106,104 @@ class NotificationControllerTest {
 
             mockMvc.perform(get(BASE_URL)
                             .header("X-User-Id", "user1")
-                            .param("organizationId", "org1")
+                            .param("org_ids", "org1")
                             .param("state", "UNSEEN")
                             .param("tier", "HIGH")
-                            .param("type", "ALERT"))
+                            .param("types", "ALERT"))
                     .andExpect(status().isOk());
+        }
+
+        @Test
+        void multipleOrgIds_returns200() throws Exception {
+            PageResponse<NotificationResponse> page = PageResponse.<NotificationResponse>builder()
+                    .content(List.of()).totalElements(0).totalPages(0).pageNumber(1).pageSize(10)
+                    .build();
+            when(notificationService.getNotifications(any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(page);
+
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("org_ids", "org1", "org2"))
+                    .andExpect(status().isOk());
+        }
+
+        @Test
+        void multipleTypes_returns200() throws Exception {
+            PageResponse<NotificationResponse> page = PageResponse.<NotificationResponse>builder()
+                    .content(List.of()).totalElements(0).totalPages(0).pageNumber(1).pageSize(10)
+                    .build();
+            when(notificationService.getNotifications(any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(page);
+
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("types", "ALERT", "COMMENT"))
+                    .andExpect(status().isOk());
+        }
+
+        @Test
+        void invalidTypeInList_returns400() throws Exception {
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("types", "alert-invalid"))
+                    .andExpect(status().isBadRequest());
+        }
+
+        @Test
+        void includeSnoozedTrue_returns200() throws Exception {
+            PageResponse<NotificationResponse> page = PageResponse.<NotificationResponse>builder()
+                    .content(List.of()).totalElements(0).totalPages(0).pageNumber(1).pageSize(10)
+                    .build();
+            when(notificationService.getNotifications(any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(page);
+
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("include_snoozed", "true"))
+                    .andExpect(status().isOk());
+        }
+
+        @Test
+        void groupByDate_returnsGroupedResponse() throws Exception {
+            GroupedNotificationResponse grouped = GroupedNotificationResponse.builder()
+                    .sections(List.of(GroupedNotificationResponse.Section.builder()
+                            .dateLabel("Today")
+                            .items(List.of(NotificationResponse.builder()
+                                    .id("n1").state("SEEN").createdAt(Instant.now()).build()))
+                            .build()))
+                    .build();
+            when(notificationService.getGroupedNotifications(any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(grouped);
+
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("group_by", "date"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.sections[0].date_label").value("Today"))
+                    .andExpect(jsonPath("$.data.sections[0].items[0].state").value("SEEN"));
+        }
+
+        @Test
+        void groupByNone_returnsPageResponse() throws Exception {
+            PageResponse<NotificationResponse> page = PageResponse.<NotificationResponse>builder()
+                    .content(List.of()).totalElements(0).totalPages(0).pageNumber(1).pageSize(10)
+                    .build();
+            when(notificationService.getNotifications(any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                    .thenReturn(page);
+
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("group_by", "none"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.total_elements").value(0));
+        }
+
+        @Test
+        void invalidGroupBy_returns400() throws Exception {
+            mockMvc.perform(get(BASE_URL)
+                            .header("X-User-Id", "user1")
+                            .param("group_by", "week"))
+                    .andExpect(status().isBadRequest());
         }
 
         @Test

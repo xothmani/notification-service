@@ -1,6 +1,7 @@
 package com.notifications.notificationservice.controller;
 
 import com.notifications.notificationservice.dto.ApiResponse;
+import com.notifications.notificationservice.dto.GroupedNotificationResponse;
 import com.notifications.notificationservice.dto.NotificationResponse;
 import com.notifications.notificationservice.dto.PageResponse;
 import com.notifications.notificationservice.service.NotificationService;
@@ -21,6 +22,8 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.List;
+
 @Slf4j
 @Validated
 @RestController
@@ -38,14 +41,15 @@ public class NotificationController {
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Bad Request — missing or invalid header/param")
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503", description = "Service Unavailable — downstream store unreachable")
     @GetMapping("/notifications")
-    public ResponseEntity<ApiResponse<PageResponse<NotificationResponse>>> getNotifications(
+    public ResponseEntity<ApiResponse<?>> getNotifications(
             @Parameter(description = "Authenticated user ID", required = true)
             @RequestHeader("X-User-Id")
             @NotBlank(message = "X-User-Id must not be blank")
             @Pattern(regexp = "^[a-zA-Z0-9_-]+$", message = "X-User-Id must match ^[a-zA-Z0-9_-]+$")
             String userId,
-            @Parameter(description = "Filter by organization ID")
-            @RequestParam(required = false) String organizationId,
+            @Parameter(description = "Filter by one or more organization IDs")
+            @RequestParam(name = "org_ids", required = false)
+            List<String> orgIds,
             @Parameter(description = "Filter by notification state",
                        schema = @Schema(allowableValues = {"UNSEEN", "SEEN", "CLICKED"}))
             @RequestParam(required = false)
@@ -55,19 +59,33 @@ public class NotificationController {
             @RequestParam(required = false)
             @Pattern(regexp = "^[A-Z_]+$", message = "tier must match ^[A-Z_]+$")
             String tier,
-            @Parameter(description = "Filter by notification type. Any uppercase string with underscores.")
-            @RequestParam(required = false)
-            @Pattern(regexp = "^[A-Z_]+$", message = "type must match ^[A-Z_]+$")
-            String type,
+            @Parameter(description = "Filter by one or more notification types. Uppercase with underscores.")
+            @RequestParam(name = "types", required = false)
+            List<@Pattern(regexp = "^[A-Z_]+$", message = "each type must match ^[A-Z_]+$") String> types,
+            @Parameter(description = "Include snoozed notifications (default: false)")
+            @RequestParam(name = "include_snoozed", defaultValue = "false")
+            boolean includeSnoozed,
+            @Parameter(description = "Group results by date. Enum: date | none (default: none)",
+                       schema = @Schema(allowableValues = {"date", "none"}))
+            @RequestParam(name = "group_by", defaultValue = "none")
+            @Pattern(regexp = "^(date|none)$", message = "group_by must be 'date' or 'none'")
+            String groupBy,
             @Parameter(description = "Page number (default: 1, minimum: 1)")
             @RequestParam(defaultValue = "1")  @Min(1)           int page,
             @Parameter(description = "Page size (default: 10, minimum: 1, maximum: 100)")
             @RequestParam(defaultValue = "10") @Min(1) @Max(100) int limit) {
 
-        PageResponse<NotificationResponse> response =
-                notificationService.getNotifications(
-                        userId, organizationId, state, tier, type, page, limit);
+        // include_snoozed is accepted but not yet applied — snooze filtering will be
+        // added in a future feature once the snooze model is defined.
 
+        if ("date".equals(groupBy)) {
+            GroupedNotificationResponse grouped = notificationService.getGroupedNotifications(
+                    userId, orgIds, state, tier, types, page, limit);
+            return ResponseEntity.ok(ApiResponse.success(grouped));
+        }
+
+        PageResponse<NotificationResponse> response =
+                notificationService.getNotifications(userId, orgIds, state, tier, types, page, limit);
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 

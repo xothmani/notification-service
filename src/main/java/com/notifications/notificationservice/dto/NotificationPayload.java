@@ -67,5 +67,8 @@ public class NotificationPayload {
     @JsonProperty("image_url")
     private String imageUrl;
 
+    @JsonProperty("task_title")
+    private String taskTitle;
+
     private Map<String, Object> metadata;
 }
