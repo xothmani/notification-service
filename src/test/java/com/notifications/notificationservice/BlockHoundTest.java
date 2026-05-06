@@ -7,6 +7,7 @@ import com.notifications.notificationservice.model.Notification;
 import com.notifications.notificationservice.repository.FailedNotificationRepository;
 import com.notifications.notificationservice.repository.NotificationRepository;
 import com.notifications.notificationservice.service.CacheService;
+import com.notifications.notificationservice.service.MessagingDeliveryService;
 import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
 import com.notifications.notificationservice.util.RedisKeyValidator;
@@ -264,11 +265,12 @@ class BlockHoundTest {
         when(cacheCursor.hasNext()).thenReturn(false);
         CacheService realCacheService = new CacheService(cacheRedis, new ObjectMapper());
 
+        MessagingDeliveryService messagingDeliveryService = mock(MessagingDeliveryService.class);
         NotificationWorker worker = new NotificationWorker(
                 redisTemplate, notificationRepository, failedNotificationRepository,
                 realCacheService, sseServiceMock, notificationServiceMock,
                 objectMapper, REAL_VALIDATOR, mongoTemplate,
-                stringRedisTemplate, "test-group");
+                stringRedisTemplate, "test-group", messagingDeliveryService);
 
         MapRecord<String, String, String> record =
                 MapRecord.create("notifications_stream", Map.of("payload", "{}"))

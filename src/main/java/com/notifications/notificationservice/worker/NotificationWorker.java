@@ -8,6 +8,7 @@ import com.notifications.notificationservice.model.UserNotificationCount;
 import com.notifications.notificationservice.repository.FailedNotificationRepository;
 import com.notifications.notificationservice.repository.NotificationRepository;
 import com.notifications.notificationservice.service.CacheService;
+import com.notifications.notificationservice.service.MessagingDeliveryService;
 import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
 import jakarta.validation.ConstraintViolation;
@@ -54,6 +55,7 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
     private final MongoTemplate                  mongoTemplate;
     private final StringRedisTemplate            stringRedisTemplate;
     private final String                         consumerGroup;
+    private final MessagingDeliveryService       messagingDeliveryService;
 
     public NotificationWorker(
             RedisTemplate<String, Object> redisTemplate,
@@ -66,7 +68,8 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
             Validator validator,
             MongoTemplate mongoTemplate,
             StringRedisTemplate stringRedisTemplate,
-            @Value("${redis.stream.consumer-group}") String consumerGroup) {
+            @Value("${redis.stream.consumer-group}") String consumerGroup,
+            MessagingDeliveryService messagingDeliveryService) {
         this.redisTemplate                = redisTemplate;
         this.notificationRepository       = notificationRepository;
         this.failedNotificationRepository = failedNotificationRepository;
@@ -78,6 +81,7 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
         this.mongoTemplate                = mongoTemplate;
         this.stringRedisTemplate          = stringRedisTemplate;
         this.consumerGroup                = consumerGroup;
+        this.messagingDeliveryService     = messagingDeliveryService;
     }
 
     @Override
@@ -209,10 +213,20 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
         // MongoDB save is the critical operation — exceptions propagate to the retry loop
         notification = notificationRepository.save(notification);
 
-        List<String> channels = payload.getChannels();
+        List<String> channels       = payload.getChannels();
+        int          recipientIndex = payload.getRecipientIds().indexOf(recipientId);
 
-        // Cache refresh is best-effort. A Redis failure must NOT reach the retry loop —
-        // doing so would re-execute the MongoDB save above and create duplicate notifications.
+        List<String> emails = payload.getRecipientEmails();
+        String email = (emails != null && recipientIndex >= 0 && recipientIndex < emails.size())
+                ? emails.get(recipientIndex) : null;
+
+        List<String> phones = payload.getRecipientPhones();
+        String phone = (phones != null && recipientIndex >= 0 && recipientIndex < phones.size())
+                ? phones.get(recipientIndex) : null;
+
+        // Cache, SSE, and messaging are all best-effort.
+        // Failures here must NOT reach the retry loop — doing so would re-execute the
+        // MongoDB save above and create duplicate notifications.
         try {
             cacheService.invalidateUserCache(recipientId);
 
@@ -230,17 +244,23 @@ public class NotificationWorker implements StreamListener<String, MapRecord<Stri
                 long unreadCount = notificationService.getUnreadCount(recipientId);
                 sseService.pushUnreadCount(recipientId, unreadCount);
             }
+
+            if (channels != null && channels.contains("EMAIL") && email != null) {
+                messagingDeliveryService.sendEmail(
+                        email, payload.getTitle(), payload.getDescription(), notification.getId());
+            }
+
+            if (channels != null && channels.contains("SMS") && phone != null) {
+                messagingDeliveryService.sendSms(
+                        phone,
+                        payload.getTitle() + ": " + payload.getDescription(),
+                        notification.getId());
+            }
         } catch (Exception e) {
-            log.warn("Cache/SSE refresh failed for user {} after save — cache may be stale until TTL",
+            log.warn("Cache/SSE/messaging refresh failed for user {} after save — cache may be stale until TTL",
                     recipientId, e);
         }
 
-        if (channels != null && channels.contains("EMAIL")) {
-            log.info("EMAIL channel — to be implemented with SendGrid");
-        }
-        if (channels != null && channels.contains("SMS")) {
-            log.info("SMS channel — to be implemented with Twilio");
-        }
         if (channels != null && channels.contains("PUSH")) {
             log.info("PUSH channel — to be implemented with FCM");
         }

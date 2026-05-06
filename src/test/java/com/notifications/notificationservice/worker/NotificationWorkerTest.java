@@ -9,6 +9,7 @@ import com.notifications.notificationservice.model.Notification;
 import com.notifications.notificationservice.repository.FailedNotificationRepository;
 import com.notifications.notificationservice.repository.NotificationRepository;
 import com.notifications.notificationservice.service.CacheService;
+import com.notifications.notificationservice.service.MessagingDeliveryService;
 import com.notifications.notificationservice.service.NotificationService;
 import com.notifications.notificationservice.service.SseService;
 import jakarta.validation.Validation;
@@ -66,6 +67,7 @@ class NotificationWorkerTest {
     @Mock StringRedisTemplate            stringRedisTemplate;
     @Mock org.springframework.data.redis.core.StreamOperations streamOps;
     @Mock ListOperations<String, Object> listOps;
+    @Mock MessagingDeliveryService       messagingDeliveryService;
 
     private static final jakarta.validation.Validator REAL_VALIDATOR =
             Validation.buildDefaultValidatorFactory().getValidator();
@@ -90,7 +92,7 @@ class NotificationWorkerTest {
                 redisTemplate, notificationRepository, failedNotificationRepository,
                 cacheService, sseService, notificationService, objectMapper,
                 REAL_VALIDATOR, mongoTemplate,
-                stringRedisTemplate, CONSUMER_GRP);
+                stringRedisTemplate, CONSUMER_GRP, messagingDeliveryService);
 
         validPayload = NotificationPayload.builder()
                 .recipientIds(List.of("user1"))
@@ -543,6 +545,118 @@ class NotificationWorkerTest {
 
         assertThatNoException().isThrownBy(() -> worker.onMessage(record(Map.of("payload", "{}"))));
         verify(sseService, never()).pushNotification(any(), any());
+        verifyXAckIssued();
+    }
+
+    // ---------------------------------------------------------------
+    // EMAIL channel delivery via MessagingDeliveryService
+    // ---------------------------------------------------------------
+
+    @Test
+    void emailChannel_withEmail_callsSendEmail() throws Exception {
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("Title").description("Desc")
+                .redirectUri("https://x.com").channels(List.of("EMAIL"))
+                .recipientEmails(List.of("user1@example.com")).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(messagingDeliveryService.sendEmail(any(), any(), any(), any())).thenReturn(true);
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(messagingDeliveryService).sendEmail(
+                eq("user1@example.com"), eq("Title"), eq("Desc"), eq("n1"));
+        verifyXAckIssued();
+    }
+
+    @Test
+    void emailChannel_nullRecipientEmails_sendEmailNotCalled() throws Exception {
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("EMAIL"))
+                .recipientEmails(null).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+
+        assertThatNoException().isThrownBy(() -> worker.onMessage(record(Map.of("payload", "{}"))));
+        verify(messagingDeliveryService, never()).sendEmail(any(), any(), any(), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void emailChannel_noEmailForRecipientIndex_sendEmailNotCalled() throws Exception {
+        // Two recipients but only one email — second recipient has no email
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1", "user2")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("EMAIL"))
+                .recipientEmails(List.of("user1@example.com")).build(); // only index 0
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        when(messagingDeliveryService.sendEmail(any(), any(), any(), any())).thenReturn(true);
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        // Only user1 gets an email — user2 is silently skipped
+        verify(messagingDeliveryService, times(1)).sendEmail(any(), any(), any(), any());
+        verifyXAckIssued();
+    }
+
+    @Test
+    void emailChannel_messagingFails_mongoSaveNotRetried() throws Exception {
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("EMAIL"))
+                .recipientEmails(List.of("user1@example.com")).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+        // sendEmail is inside the best-effort try-catch; even if it throws MongoDB is not retried
+        doThrow(new RuntimeException("messaging service down"))
+                .when(messagingDeliveryService).sendEmail(any(), any(), any(), any());
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        // Save called exactly once — no retry caused by the messaging failure
+        verify(notificationRepository, times(1)).save(any());
+        verifyXAckIssued();
+    }
+
+    // ---------------------------------------------------------------
+    // SMS channel delivery via MessagingDeliveryService
+    // ---------------------------------------------------------------
+
+    @Test
+    void smsChannel_withPhone_callsSendSms() throws Exception {
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("Title").description("Desc")
+                .redirectUri("https://x.com").channels(List.of("SMS"))
+                .recipientPhones(List.of("+1234567890")).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+
+        worker.onMessage(record(Map.of("payload", "{}")));
+
+        verify(messagingDeliveryService).sendSms(
+                eq("+1234567890"), eq("Title: Desc"), eq("n1"));
+        verifyXAckIssued();
+    }
+
+    @Test
+    void smsChannel_nullRecipientPhones_sendSmsNotCalled() throws Exception {
+        NotificationPayload payload = NotificationPayload.builder()
+                .recipientIds(List.of("user1")).organizationId("org1")
+                .tier("HIGH").type("ALERT").title("T").description("D")
+                .redirectUri("https://x.com").channels(List.of("SMS"))
+                .recipientPhones(null).build();
+        when(objectMapper.readValue(anyString(), eq(NotificationPayload.class))).thenReturn(payload);
+        when(notificationRepository.save(any())).thenReturn(savedNotification);
+
+        assertThatNoException().isThrownBy(() -> worker.onMessage(record(Map.of("payload", "{}"))));
+        verify(messagingDeliveryService, never()).sendSms(any(), any(), any());
         verifyXAckIssued();
     }
 }

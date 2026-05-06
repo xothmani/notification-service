@@ -2,21 +2,17 @@ package com.notifications.notificationservice.config;
 
 import com.notifications.notificationservice.worker.NotificationWorker;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
-import org.springframework.data.redis.connection.lettuce.LettuceClientConfiguration;
-import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.ReadOffset;
 import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
+import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 
 import java.time.Duration;
@@ -30,32 +26,10 @@ public class RedisStreamConfig {
         return new StringRedisTemplate(factory);
     }
 
-    /**
-     * Dedicated connection factory for the stream listener container.
-     * The main factory uses a 2 s command timeout (fast-fail for cache/write ops).
-     * XREADGROUP BLOCK blocks for the full poll interval (~2 s) before returning
-     * empty — that equals the main timeout and triggers QueryTimeoutException on
-     * every idle poll cycle. This factory raises the command timeout to 30 s so
-     * the blocking read always completes well within the timeout.
-     */
-    @Bean
-    public RedisConnectionFactory streamConnectionFactory(
-            @Value("${spring.data.redis.host}") String host,
-            @Value("${spring.data.redis.port}") int port) {
-
-        RedisStandaloneConfiguration serverConfig = new RedisStandaloneConfiguration(host, port);
-
-        LettuceClientConfiguration clientConfig = LettuceClientConfiguration.builder()
-                .commandTimeout(Duration.ofSeconds(30))
-                .build();
-
-        return new LettuceConnectionFactory(serverConfig, clientConfig);
-    }
-
     @SuppressWarnings("unchecked")
     @Bean(destroyMethod = "stop")
     public StreamMessageListenerContainer<String, MapRecord<String, String, String>> streamContainer(
-            @Qualifier("streamConnectionFactory") RedisConnectionFactory streamFactory,
+            RedisConnectionFactory factory,
             StringRedisTemplate stringRedisTemplate,
             @Lazy NotificationWorker notificationWorker,
             @Value("${redis.stream.key}") String streamKey,
@@ -79,14 +53,20 @@ public class RedisStreamConfig {
             }
         }
 
+        // Uses the auto-configured (pooled) RedisConnectionFactory. The connection pool
+        // establishes its connections eagerly at startup when Docker DNS is working, so
+        // xReadGroup borrows a pre-resolved pooled connection rather than triggering a
+        // new DNS lookup on a Netty I/O thread. pollTimeout of 100ms keeps each
+        // XREADGROUP call well under the 2s command timeout on the auto-configured factory.
         var options = StreamMessageListenerContainer.StreamMessageListenerContainerOptions
                 .builder()
-                .serializer(StringRedisSerializer.UTF_8)
+                .pollTimeout(Duration.ofMillis(100))
+                .serializer(RedisSerializer.string())
                 .build();
 
         StreamMessageListenerContainer<String, MapRecord<String, String, String>> container =
                 (StreamMessageListenerContainer<String, MapRecord<String, String, String>>)
-                        StreamMessageListenerContainer.create(streamFactory, options);
+                        StreamMessageListenerContainer.create(factory, options);
 
         container.receive(
                 Consumer.from(consumerGroup, consumerName),

@@ -11,6 +11,7 @@ services:
       SPRING_DATA_REDIS_HOST: notification-redis
       SPRING_DATA_REDIS_PORT: 6379
       INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-only-change-in-production}
+      JAVA_TOOL_OPTIONS: "-Dio.netty.resolver.dns.preferNative=false -Djava.net.preferIPv4Stack=true"
     networks:
       - notification
 

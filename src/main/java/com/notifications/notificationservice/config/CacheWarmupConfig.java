@@ -35,6 +35,7 @@ public class CacheWarmupConfig implements ApplicationRunner {
     private final MongoTemplate mongoTemplate;
     private final CacheService cacheService;
 
+
     @Override
     public void run(ApplicationArguments args) {
         log.info("Starting cache warmup for top {} most recently active users...", WARMUP_LIMIT);

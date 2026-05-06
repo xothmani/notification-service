@@ -33,6 +33,14 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- Spring Cloud 2025.0.0 — matches Spring Boot 3.5.x -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>2025.0.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <!-- Force Netty 4.2.12.Final across all transitive deps (Lettuce, MongoDB driver).
                  Netty 4.1.114.Final carries multiple High CVEs flagged by OWASP. -->
             <dependency>
@@ -53,6 +61,21 @@
                 <groupId>org.apache.logging.log4j</groupId>
                 <artifactId>log4j-api</artifactId>
                 <version>2.25.4</version>
+            </dependency>
+            <!-- Downgrade spring-data-redis to 3.3.5 (Lettuce 6.3.x) to avoid the
+                 doGetAsyncDedicatedConnection DNS resolution bug in Lettuce 6.6.x
+                 that causes redis/<unresolved> failures in Paketo minimal images. -->
+            <dependency>
+                <groupId>org.springframework.data</groupId>
+                <artifactId>spring-data-redis</artifactId>
+                <version>3.3.5</version>
+            </dependency>
+            <!-- Pin lettuce-core explicitly — Spring Boot BOM overrides spring-data-redis
+                 and would otherwise pull 6.6.0 despite the spring-data-redis 3.3.5 pin. -->
+            <dependency>
+                <groupId>io.lettuce</groupId>
+                <artifactId>lettuce-core</artifactId>
+                <version>6.3.2.RELEASE</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -83,6 +106,10 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>2.8.17</version>
@@ -109,6 +136,10 @@
             <artifactId>blockhound</artifactId>
             <version>1.0.8.RELEASE</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
         </dependency>
     </dependencies>
 

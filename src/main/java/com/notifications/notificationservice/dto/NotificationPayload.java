@@ -67,5 +67,13 @@ public class NotificationPayload {
     @JsonProperty("image_url")
     private String imageUrl;
 
+    // Parallel to recipient_ids: recipientEmails[i] is the email for recipientIds[i]. Nullable.
+    @JsonProperty("recipient_emails")
+    private List<String> recipientEmails;
+
+    // Parallel to recipient_ids: recipientPhones[i] is the phone for recipientIds[i]. Nullable.
+    @JsonProperty("recipient_phones")
+    private List<String> recipientPhones;
+
     private Map<String, Object> metadata;
 }
